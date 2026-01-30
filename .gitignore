@@ -1,0 +1,7 @@
+
+financial_qwen_native_v1/
+financial_qwen_native_v1_checkpoints/
+venv/
+__pycache__/
+*.pyc
+hybrid_data.jsonl
