@@ -1,7 +1,48 @@
 
+# Model adapters & checkpoints — large files, never commit
 financial_qwen_native_v1/
 financial_qwen_native_v1_checkpoints/
-venv/
+models/
+
+# Generated/trained artifacts — reproducible, never commit
+chroma_db/
+categorizer/saved/
+*.pkl
+*.pt
+
+# Training data — large generated file
+hybrid_data.jsonl
+
+# Environment variables — never commit secrets
+.env
+.env.*
+!.env.example
+
+# Python
 __pycache__/
 *.pyc
-hybrid_data.jsonl
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Models — local LLM model files are large, never commit
+*.gguf
+*.bin
+*.safetensors
+models/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

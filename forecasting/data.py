@@ -1,0 +1,153 @@
+import numpy as np
+import pandas as pd
+import pymysql
+import pymysql.cursors
+from typing import Optional
+
+# ── DB config (mirrors api.py) ────────────────────────────────────────────────
+DB_CONFIG = {
+    "host": "100.109.225.15",
+    "port": 3308,
+    "user": "root",
+    "password": "rootpass",
+    "database": "financedb",
+    "cursorclass": pymysql.cursors.DictCursor
+}
+
+SEQ_LEN = 30  # days of history used as input
+
+
+# ── Minimal MinMaxScaler (no scikit-learn dependency) ────────────────────────
+
+class MinMaxScaler:
+    """Scales each feature to [0, 1]. Safe against zero-range columns."""
+
+    def fit(self, X: np.ndarray) -> "MinMaxScaler":
+        self.min_ = X.min(axis=0)
+        self.max_ = X.max(axis=0)
+        self.range_ = np.where(self.max_ - self.min_ == 0, 1.0, self.max_ - self.min_)
+        return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        return (X - self.min_) / self.range_
+
+    def inverse_transform(self, X: np.ndarray) -> np.ndarray:
+        return X * self.range_ + self.min_
+
+    def to_dict(self) -> dict:
+        return {
+            "min_":   self.min_.tolist(),
+            "max_":   self.max_.tolist(),
+            "range_": self.range_.tolist(),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "MinMaxScaler":
+        s = cls()
+        s.min_   = np.array(d["min_"])
+        s.max_   = np.array(d["max_"])
+        s.range_ = np.array(d["range_"])
+        return s
+
+
+# ── DB fetch ──────────────────────────────────────────────────────────────────
+
+def fetch_user_daily_spending(user_id: int) -> pd.DataFrame:
+    """
+    Returns a long-format DataFrame with columns [day, category, amount]
+    for all EXPENSE transactions of the given user, ordered by day asc.
+    """
+    conn = pymysql.connect(**DB_CONFIG)
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    DATE(t.occurred_at) AS day,
+                    c.name              AS category,
+                    SUM(t.amount)       AS amount
+                FROM transactions t
+                JOIN categories c ON t.category_id = c.id
+                WHERE t.user_id = %s
+                  AND t.type    = 'EXPENSE'
+                GROUP BY DATE(t.occurred_at), c.name
+                ORDER BY day ASC
+            """, (user_id,))
+            rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return pd.DataFrame(columns=["day", "category", "amount"])
+
+    df = pd.DataFrame(rows)
+    df["day"]    = pd.to_datetime(df["day"])
+    df["amount"] = df["amount"].astype(float)
+    return df
+
+
+# ── Pivot & align ─────────────────────────────────────────────────────────────
+
+def pivot_to_daily_matrix(
+    df: pd.DataFrame,
+    known_columns: Optional[list] = None
+) -> tuple[pd.DataFrame, list]:
+    """
+    Converts long-format df → wide daily matrix (dates × features).
+    Appends a '_total' column.
+
+    If known_columns is provided (inference mode), the result is aligned
+    to that exact column order — missing categories become 0, new ones
+    are dropped. This keeps training/inference feature spaces identical.
+
+    Returns (wide_df, column_list).
+    """
+    if df.empty:
+        if known_columns:
+            empty = pd.DataFrame(columns=known_columns)
+            return empty, known_columns
+        return pd.DataFrame(), []
+
+    wide = df.pivot_table(
+        index="day", columns="category", values="amount",
+        aggfunc="sum", fill_value=0.0
+    )
+    wide.index = pd.to_datetime(wide.index)
+
+    # Fill calendar gaps so every day has a row
+    full_range = pd.date_range(wide.index.min(), wide.index.max(), freq="D")
+    wide = wide.reindex(full_range, fill_value=0.0)
+
+    if known_columns is not None:
+        # Align to training columns (exclude _total — we recompute it)
+        train_cats = [c for c in known_columns if c != "_total"]
+        wide = wide.reindex(columns=train_cats, fill_value=0.0)
+
+    wide["_total"] = wide.sum(axis=1)
+    columns = list(wide.columns)
+    return wide, columns
+
+
+# ── Sequence builder ──────────────────────────────────────────────────────────
+
+def build_sequences(matrix: np.ndarray, seq_len: int = SEQ_LEN) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Creates sliding-window (X, y) pairs.
+    X[i] : window of seq_len days   → shape (seq_len, F)
+    y[i] : mean daily spending of the single next day → shape (F,)
+
+    For sparse users (fewer than seq_len+1 rows), the matrix is padded
+    with leading zeros and one sequence is returned.
+    """
+    T, F = matrix.shape
+
+    if T < seq_len + 1:
+        pad = np.zeros((seq_len + 1 - T, F), dtype=np.float32)
+        matrix = np.vstack([pad, matrix])
+        T = matrix.shape[0]
+
+    X, y = [], []
+    for i in range(T - seq_len):
+        X.append(matrix[i : i + seq_len])
+        y.append(matrix[i + seq_len])   # next single day (mean daily target)
+
+    return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)

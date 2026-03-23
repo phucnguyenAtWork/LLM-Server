@@ -1,0 +1,26 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+
+# Large model files — mount as Docker volumes instead
+financial_qwen_native_v1/
+financial_qwen_native_v1_checkpoints/
+models/
+chroma_db/
+*.gguf
+*.bin
+*.safetensors
+
+# Data
+hybrid_data.jsonl
+
+# Dev files
+.env
+.env.*
+*.log
+.vscode/
+.idea/
