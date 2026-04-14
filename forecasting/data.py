@@ -1,17 +1,25 @@
+import os
 import numpy as np
 import pandas as pd
+import httpx
 import pymysql
 import pymysql.cursors
 from typing import Optional
+from dotenv import load_dotenv
 
-# ── DB config (mirrors api.py) ────────────────────────────────────────────────
+load_dotenv()
+
+# ── Mac API (primary data source) ───────────────────────────────────────────
+MAC_API_URL = os.getenv("MAC_API_URL", "http://100.109.225.15:4001/api")
+
+# ── DB config (fallback when Mac API unreachable) ────────────────────────────
 DB_CONFIG = {
-    "host": "100.109.225.15",
-    "port": 3308,
-    "user": "root",
-    "password": "rootpass",
-    "database": "financedb",
-    "cursorclass": pymysql.cursors.DictCursor
+    "host":     os.getenv("DB_HOST", "100.109.225.15"),
+    "port":     int(os.getenv("DB_PORT", "3308")),
+    "user":     os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", ""),
+    "database": os.getenv("DB_NAME", "financedb"),
+    "cursorclass": pymysql.cursors.DictCursor,
 }
 
 SEQ_LEN = 30  # days of history used as input
@@ -50,15 +58,49 @@ class MinMaxScaler:
         return s
 
 
-# ── DB fetch ──────────────────────────────────────────────────────────────────
+# ── Data fetch (Mac API → DB fallback) ───────────────────────────────────────
 
-def fetch_user_daily_spending(user_id: int) -> pd.DataFrame:
+def fetch_user_daily_spending(user_id: str) -> pd.DataFrame:
     """
     Returns a long-format DataFrame with columns [day, category, amount]
     for all EXPENSE transactions of the given user, ordered by day asc.
+
+    Tries Mac API first, falls back to direct DB.
     """
-    conn = pymysql.connect(**DB_CONFIG)
+    rows = _mac_fetch_daily_spending(user_id)
+    if rows is None:
+        rows = _db_fetch_daily_spending(user_id)
+
+    if not rows:
+        return pd.DataFrame(columns=["day", "category", "amount"])
+
+    df = pd.DataFrame(rows)
+    df["day"]    = pd.to_datetime(df["day"])
+    df["amount"] = df["amount"].astype(float)
+    return df
+
+
+def _mac_fetch_daily_spending(user_id: str) -> Optional[list[dict]]:
+    """Fetch daily spending from Mac API (sync)."""
     try:
+        r = httpx.get(
+            f"{MAC_API_URL}/fina/users/{user_id}/spending/daily",
+            timeout=10.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+        rows = data.get("rows", data) if isinstance(data, dict) else data
+        print(f"[Data] User {user_id} daily spending via Mac API: {len(rows)} rows")
+        return rows
+    except Exception as e:
+        print(f"[Data] Mac API unreachable ({e}), falling back to DB")
+        return None
+
+
+def _db_fetch_daily_spending(user_id: str) -> list[dict]:
+    """Fetch daily spending directly from DB (fallback)."""
+    try:
+        conn = pymysql.connect(**DB_CONFIG)
         with conn.cursor() as cursor:
             cursor.execute("""
                 SELECT
@@ -73,16 +115,22 @@ def fetch_user_daily_spending(user_id: int) -> pd.DataFrame:
                 ORDER BY day ASC
             """, (user_id,))
             rows = cursor.fetchall()
-    finally:
         conn.close()
+        return _convert_decimals(rows)
+    except Exception as e:
+        print(f"[Data DB Fallback] Error: {e}")
+        return []
 
-    if not rows:
-        return pd.DataFrame(columns=["day", "category", "amount"])
 
-    df = pd.DataFrame(rows)
-    df["day"]    = pd.to_datetime(df["day"])
-    df["amount"] = df["amount"].astype(float)
-    return df
+def _convert_decimals(obj):
+    from decimal import Decimal
+    if isinstance(obj, list):
+        return [_convert_decimals(i) for i in obj]
+    if isinstance(obj, dict):
+        return {k: _convert_decimals(v) for k, v in obj.items()}
+    if isinstance(obj, Decimal):
+        return float(obj)
+    return obj
 
 
 # ── Pivot & align ─────────────────────────────────────────────────────────────

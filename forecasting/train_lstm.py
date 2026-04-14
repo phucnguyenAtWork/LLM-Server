@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import httpx
 import pymysql
 import torch
 import torch.nn as nn
@@ -27,7 +28,7 @@ import torch.nn as nn
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from forecasting.data import (
-    DB_CONFIG, SEQ_LEN, MinMaxScaler,
+    MAC_API_URL, DB_CONFIG, SEQ_LEN, MinMaxScaler,
     fetch_user_daily_spending, pivot_to_daily_matrix, build_sequences
 )
 from forecasting.model import SpendingLSTM
@@ -38,18 +39,23 @@ HIDDEN_SIZE   = 64
 NUM_LAYERS    = 2
 
 
-def get_all_user_ids() -> list[int]:
-    conn = pymysql.connect(**DB_CONFIG)
+def get_all_user_ids() -> list[str]:
+    """Get all user IDs with expense data. Mac API → DB fallback."""
+    # Try Mac API — get categories endpoint doesn't have user IDs,
+    # but we can use the transactions endpoint indirectly via DB fallback
     try:
+        conn = pymysql.connect(**DB_CONFIG)
         with conn.cursor() as cursor:
             cursor.execute("SELECT DISTINCT user_id FROM transactions WHERE type = 'EXPENSE'")
             rows = cursor.fetchall()
-    finally:
         conn.close()
-    return [r["user_id"] for r in rows]
+        return [r["user_id"] for r in rows]
+    except Exception as e:
+        print(f"[LSTM Train] Could not fetch user IDs: {e}")
+        return []
 
 
-def train_for_user(user_id: int, epochs: int, seq_len: int):
+def train_for_user(user_id: str, epochs: int, seq_len: int):
     print(f"\n[LSTM Train] User {user_id}")
 
     # ── 1. Fetch & build matrix ──────────────────────────────────────────────
@@ -147,7 +153,7 @@ def train_for_user(user_id: int, epochs: int, seq_len: int):
 def main():
     parser = argparse.ArgumentParser(description="Train LSTM forecasting model(s).")
     group  = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--user_id",    type=int, help="Train for a specific user")
+    group.add_argument("--user_id",    type=str, help="Train for a specific user (UUID)")
     group.add_argument("--all_users",  action="store_true", help="Train for every user in DB")
     parser.add_argument("--epochs",    type=int, default=50,    help="Training epochs (default: 50)")
     parser.add_argument("--seq_len",   type=int, default=SEQ_LEN, help=f"Input sequence length in days (default: {SEQ_LEN})")

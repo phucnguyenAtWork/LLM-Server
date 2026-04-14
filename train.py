@@ -1,105 +1,172 @@
-import os
-import torch
-import inspect
-from datasets import load_dataset
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-)
-from peft import LoraConfig
-from trl import SFTTrainer, SFTConfig
+"""
+FINA Training Script v3
+========================
+QLoRA fine-tuning for Qwen2.5-3B-Instruct using structured prompt/completion data.
+Supervises only assistant completions, not the full prompt.
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
-BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
-NEW_MODEL_NAME = "financial_qwen_native_v1"
-DATA_FILE = "hybrid_data.jsonl"
-MAX_SEQ_LENGTH = 512
+Dataset format (JSONL):
+  {"prompt": [...messages...], "completion": [...messages...], "family": "..."}
+
+Usage: python train.py
+"""
+
+import inspect
+import os
+import sys
+from pathlib import Path
+
+import torch
+from datasets import load_dataset
+from peft import LoraConfig, prepare_model_for_kbit_training
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"
+NEW_MODEL_NAME = "financial_qwen_native_v7"
+PROJECT_ROOT = Path(__file__).resolve().parent
+DATA_FILE = PROJECT_ROOT / "hybrid_data.jsonl"
+CHECKPOINT_DIR = PROJECT_ROOT / f"{NEW_MODEL_NAME}_checkpoints"
+MODEL_OUTPUT_DIR = PROJECT_ROOT / NEW_MODEL_NAME
+MAX_SEQ_LENGTH = 2048
+EVAL_SPLIT = 0.05  # 5% held out for validation
+
+
+def ensure_utf8_mode():
+    """TRL reads template files with the process default encoding on Windows."""
+    if sys.flags.utf8_mode:
+        return
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
+
+
+def require_training_gpu() -> tuple[bool, torch.dtype]:
+    """This QLoRA configuration requires CUDA."""
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA GPU not detected. train.py is configured for 4-bit QLoRA and cannot train "
+            "Qwen2.5-3B effectively on CPU. Run it on a CUDA machine."
+        )
+    use_bf16 = torch.cuda.is_bf16_supported()
+    compute_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    return use_bf16, compute_dtype
+
 
 def train():
-    print(f" Initializing Training for {BASE_MODEL}...")
+    ensure_utf8_mode()
+    from trl import SFTTrainer, SFTConfig
 
-    # 1. Load Tokenizer
+    print(f"Initializing QLoRA training for {BASE_MODEL}...")
+    print(f"Python: {sys.executable}")
+    print(f"Dataset: {DATA_FILE}")
+
+    if not DATA_FILE.exists():
+        raise FileNotFoundError(f"Dataset file not found: {DATA_FILE}")
+
+    use_bf16, compute_dtype = require_training_gpu()
+    print(f"CUDA detected. bf16={use_bf16}, compute_dtype={compute_dtype}")
+
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
-    
     tokenizer.model_max_length = MAX_SEQ_LENGTH
-    print(f"Enforced max sequence length: {tokenizer.model_max_length}")
+    print(f"Tokenizer loaded. max_length={tokenizer.model_max_length}")
 
-    # 2. Load Dataset
     print(f"Loading dataset: {DATA_FILE}")
-    dataset = load_dataset("json", data_files=DATA_FILE, split="train")
+    raw_dataset = load_dataset("json", data_files=str(DATA_FILE), split="train")
 
-    # 3. Load Model (Native FP16)
-    print("Loading model in Float16...")
+    split = raw_dataset.train_test_split(test_size=EVAL_SPLIT, seed=42)
+    train_dataset = split["train"]
+    eval_dataset = split["test"]
+    print(f"Train: {len(train_dataset)} | Eval: {len(eval_dataset)}")
+
+    family_counts = {}
+    for row in raw_dataset:
+        fam = row.get("family", "unknown")
+        family_counts[fam] = family_counts.get(fam, 0) + 1
+    print("Family distribution:")
+    for fam, cnt in sorted(family_counts.items(), key=lambda x: -x[1]):
+        pct = cnt / len(raw_dataset) * 100
+        print(f"  {fam:30s} {cnt:6d} ({pct:5.1f}%)")
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=compute_dtype,
+        bnb_4bit_use_double_quant=True,
+    )
+
+    print("Loading model in 4-bit (QLoRA)...")
     model = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL,
-        dtype=torch.float16,
+        quantization_config=bnb_config,
         device_map="auto",
-        trust_remote_code=True
+        trust_remote_code=True,
     )
-    
-    # Enable memory saving
+
+    model = prepare_model_for_kbit_training(model)
+    model.config.use_cache = False
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
 
-    # 4. Configure LoRA (The Adapter)
-    # The Trainer will apply them for us.
     peft_config = LoraConfig(
         r=16,
-        lora_alpha=16,
+        lora_alpha=32,
         lora_dropout=0.05,
         bias="none",
         task_type="CAUSAL_LM",
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ],
     )
 
-    # 5. Initialize SFTConfig
     sft_config = SFTConfig(
-        output_dir=f"./{NEW_MODEL_NAME}_checkpoints",
-        dataset_text_field="text",
-        num_train_epochs=3,
+        output_dir=str(CHECKPOINT_DIR),
+        num_train_epochs=4,
         per_device_train_batch_size=1,
-        gradient_accumulation_steps=4,
-        learning_rate=2e-4,
-        fp16=True,
+        gradient_accumulation_steps=8,
+        learning_rate=1.5e-4,
+        warmup_ratio=0.05,
+        bf16=use_bf16,
+        fp16=not use_bf16,
         logging_steps=10,
         save_strategy="epoch",
+        eval_strategy="epoch",
         optim="adamw_torch",
         report_to="none",
         packing=False,
+        max_length=MAX_SEQ_LENGTH,
+        completion_only_loss=True,
     )
 
-    # 6. Prepare Trainer Arguments
     trainer_args = {
-        "model": model,             # Pass the RAW base model
-        "train_dataset": dataset,
-        "peft_config": peft_config, # Pass config so Trainer handles wrapping
+        "model": model,
+        "train_dataset": train_dataset,
+        "eval_dataset": eval_dataset,
+        "peft_config": peft_config,
         "args": sft_config,
     }
 
-    # 7. Auto-Detect Correct Tokenizer Argument
-    # This prevents the "unexpected keyword argument" error
-    trainer_signature = inspect.signature(SFTTrainer.__init__)
-    if 'processing_class' in trainer_signature.parameters:
-        print("Detected: Library wants 'processing_class'")
-        trainer_args['processing_class'] = tokenizer
+    sig = inspect.signature(SFTTrainer.__init__)
+    if "processing_class" in sig.parameters:
+        trainer_args["processing_class"] = tokenizer
     else:
-        print("Detected: Library wants 'tokenizer'")
-        trainer_args['tokenizer'] = tokenizer
+        trainer_args["tokenizer"] = tokenizer
 
-    # 8. Start Trainer
     trainer = SFTTrainer(**trainer_args)
 
-    print("Starting Training...")
+    print("Starting training...")
     trainer.train()
 
-    # 9. Save
-    print(f"Saving model to {NEW_MODEL_NAME}...")
-    trainer.model.save_pretrained(NEW_MODEL_NAME)
-    tokenizer.save_pretrained(NEW_MODEL_NAME)
-    print("DONE! Model saved.")
+    print(f"Saving adapter to {MODEL_OUTPUT_DIR}...")
+    trainer.model.save_pretrained(str(MODEL_OUTPUT_DIR))
+    tokenizer.save_pretrained(str(MODEL_OUTPUT_DIR))
+    print("Done. Model saved.")
+
 
 if __name__ == "__main__":
     train()

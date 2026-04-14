@@ -12,13 +12,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pymysql
+import httpx
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from forecasting.data import (
-    DB_CONFIG, SEQ_LEN, MinMaxScaler,
+    MAC_API_URL, DB_CONFIG, SEQ_LEN, MinMaxScaler,
     fetch_user_daily_spending, pivot_to_daily_matrix
 )
 from forecasting.model import SpendingLSTM
@@ -29,7 +29,7 @@ MODELS_DIR = Path(__file__).parent.parent / "models"
 _cache: dict = {}
 
 
-def _load_model(user_id: int):
+def _load_model(user_id: str):
     """Load (and cache) model + metadata for a user. Returns (model, meta) or (None, None)."""
     user_dir   = MODELS_DIR / f"user_{user_id}"
     model_path = user_dir / "lstm.pt"
@@ -55,24 +55,35 @@ def _load_model(user_id: int):
     return lstm, meta
 
 
-def _cold_start_fallback(user_id: int) -> dict:
+def _cold_start_fallback(user_id: str) -> dict:
     """
     Returns a naive forecast when no trained model exists.
     Uses the user's total historical expense * 1.05 as monthly estimate.
+    Tries Mac API first, falls back to direct DB.
     """
+    total = 0.0
+    # Try Mac API first
     try:
-        conn = pymysql.connect(**DB_CONFIG)
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT SUM(amount) as total FROM transactions WHERE user_id = %s AND type = 'EXPENSE'",
-                (user_id,)
-            )
-            row = cursor.fetchone()
-        conn.close()
-        total = float(row["total"]) if row and row["total"] else 0.0
+        r = httpx.get(f"{MAC_API_URL}/fina/users/{user_id}/summary", timeout=10.0)
+        r.raise_for_status()
+        data = r.json()
+        spending = data.get("spending", [])
+        total = sum(float(s.get("spent", 0)) for s in spending)
     except Exception as e:
-        print(f"[LSTM Fallback] DB error: {e}")
-        total = 0.0
+        print(f"[LSTM Fallback] Mac API unreachable ({e}), trying DB")
+        try:
+            import pymysql
+            conn = pymysql.connect(**DB_CONFIG)
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT SUM(amount) as total FROM transactions WHERE user_id = %s AND type = 'EXPENSE'",
+                    (user_id,)
+                )
+                row = cursor.fetchone()
+            conn.close()
+            total = float(row["total"]) if row and row["total"] else 0.0
+        except Exception as e2:
+            print(f"[LSTM Fallback] DB error: {e2}")
 
     monthly_estimate = total * 1.05
     return {
@@ -83,7 +94,7 @@ def _cold_start_fallback(user_id: int) -> dict:
     }
 
 
-def forecast_user(user_id: int) -> dict:
+def forecast_user(user_id: str) -> dict:
     """
     Predicts next-week and next-month spending for a user.
 

@@ -2,6 +2,14 @@
 # Model adapters & checkpoints — large files, never commit
 financial_qwen_native_v1/
 financial_qwen_native_v1_checkpoints/
+financial_qwen_native_v2/
+financial_qwen_native_v2_checkpoints/
+financial_qwen_native_v3/
+financial_qwen_native_v3_checkpoints/
+financial_qwen_native_v4/
+financial_qwen_native_v4_checkpoints/
+financial_qwen_native_v5/
+financial_qwen_native_v5_checkpoints/
 models/
 
 # Generated/trained artifacts — reproducible, never commit
@@ -17,6 +25,8 @@ hybrid_data.jsonl
 .env
 .env.*
 !.env.example
+.agents
+.skills-lock.json
 
 # Python
 __pycache__/

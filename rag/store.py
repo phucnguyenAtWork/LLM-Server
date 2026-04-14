@@ -9,10 +9,14 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
+import os
+import httpx
 import pymysql
 import pymysql.cursors
+from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+load_dotenv()
 
 try:
     import chromadb
@@ -22,12 +26,16 @@ except ImportError:
     CHROMA_AVAILABLE = False
     print("[RAG] WARNING: chromadb not installed. Run: pip install chromadb")
 
+# ── Mac API (primary data source) ───────────────────────────────────────────
+MAC_API_URL = os.getenv("MAC_API_URL", "http://100.109.225.15:4001/api")
+
+# ── DB config (fallback) ────────────────────────────────────────────────────
 DB_CONFIG = {
-    "host": "100.109.225.15",
-    "port": 3308,
-    "user": "root",
-    "password": "rootpass",
-    "database": "financedb",
+    "host":     os.getenv("DB_HOST", "100.109.225.15"),
+    "port":     int(os.getenv("DB_PORT", "3308")),
+    "user":     os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", ""),
+    "database": os.getenv("DB_NAME", "financedb"),
     "cursorclass": pymysql.cursors.DictCursor,
 }
 
@@ -54,9 +62,26 @@ def _format_transaction(t: dict) -> str:
     return f"Spent {amount:,.0f} VND on {category} on {date}."
 
 
-def _fetch_user_transactions(user_id: int) -> list[dict]:
-    conn = pymysql.connect(**DB_CONFIG)
+def _fetch_user_transactions(user_id: str) -> list[dict]:
+    """Fetch transactions via Mac API, fall back to direct DB."""
+    # Try Mac API first
     try:
+        r = httpx.get(
+            f"{MAC_API_URL}/fina/users/{user_id}/transactions",
+            params={"limit": 200},
+            timeout=10.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+        rows = data.get("transactions", data) if isinstance(data, dict) else data
+        print(f"[RAG] Fetched {len(rows)} transactions via Mac API for user {user_id}")
+        return rows
+    except Exception as e:
+        print(f"[RAG] Mac API unreachable ({e}), falling back to DB")
+
+    # DB fallback
+    try:
+        conn = pymysql.connect(**DB_CONFIG)
         with conn.cursor() as cursor:
             cursor.execute("""
                 SELECT t.id, t.amount, t.type, t.occurred_at,
@@ -68,11 +93,13 @@ def _fetch_user_transactions(user_id: int) -> list[dict]:
                 LIMIT 200
             """, (user_id,))
             return cursor.fetchall()
-    finally:
         conn.close()
+    except Exception as e:
+        print(f"[RAG DB Fallback] Error: {e}")
+        return []
 
 
-def index_user(user_id: int) -> int:
+def index_user(user_id: str) -> int:
     """
     (Re)builds the ChromaDB collection for a user.
     Returns the number of documents indexed.
@@ -116,12 +143,6 @@ def index_user(user_id: int) -> int:
     batch_size = 50
     for i in range(0, len(docs), batch_size):
         collection.upsert(
-            documents=ids[i:i+batch_size],
-            ids=ids[i:i+batch_size],
-            metadatas=metas[i:i+batch_size],
-        )
-        # ChromaDB needs documents not IDs as the text
-        collection.upsert(
             documents=docs[i:i+batch_size],
             ids=ids[i:i+batch_size],
             metadatas=metas[i:i+batch_size],
@@ -131,7 +152,7 @@ def index_user(user_id: int) -> int:
     return len(docs)
 
 
-def get_collection(user_id: int):
+def get_collection(user_id: str):
     """Returns the ChromaDB collection for a user, or None."""
     client = _get_client()
     if client is None:

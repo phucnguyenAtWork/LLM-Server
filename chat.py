@@ -1,88 +1,77 @@
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel
-
-# ==========================================
-# CONFIGURATION
-# ==========================================
-BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
-ADAPTER_NAME = "financial_qwen_native_v1"
-
-SYSTEM_PROMPT = """
-You are FINA, an advanced Financial AI Assistant. Your goal is to provide accurate, role-specific financial guidance.
-
-WHO YOU ARE:
-- You act as both a strict "Secretary" (auditing budgets) and a strategic "Advisor" (giving life advice).
-- You are professional, concise, and mathematically precise.
-
-YOUR CAPABILITIES:
-1. Budget Auditing: Analyze 'Target' vs 'Actual' spending. Flag overspending immediately.
-2. Role-Based Advice: adapt your strategy based on the user's role:
-   - STUDENTS: Focus on cutting costs, avoiding debt, and student discounts.
-   - FREELANCERS: Focus on tax savings (30% rule), income stability, and business deductions.
-   - WORKERS: Focus on 401k matching, emergency funds, and long-term investing.
-
-CONSTRAINTS:
-- Do NOT hallucinate. If you do not know a financial term, ask for clarification.
-- Keep answers under 4 sentences unless asked for a detailed report.
+"""
+FINA Chat — standalone CLI for testing the model locally.
+Uses the same SYSTEM_PROMPT and JSON output format as api.py.
 """
 
+import json
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from peft import PeftModel
+from fina_schema import SYSTEM_PROMPT, parse_model_output, fallback_output
+
+BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"
+ADAPTER_NAME = "financial_qwen_native_v7"
+
+
 def chat():
-    print(" Loading FINA (Financial AI)...")
+    print(f"Loading {BASE_MODEL} + {ADAPTER_NAME}...")
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
-    
+
+    bnb_config = BitsAndBytesConfig(load_in_8bit=True)
     base_model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL,
-        dtype=torch.float16,
-        device_map="auto",
-        trust_remote_code=True
+        BASE_MODEL, quantization_config=bnb_config, device_map="auto", trust_remote_code=True
     )
 
-    print(f"Attaching Brain: {ADAPTER_NAME}...")
     model = PeftModel.from_pretrained(base_model, ADAPTER_NAME)
     model.eval()
 
-    print("\nFINA ONLINE. (Type 'quit' to exit)")
+    print("\nFINA ONLINE (JSON mode). Type 'quit' to exit.")
     print("-" * 50)
+
+    history = []
 
     while True:
         user_input = input("\nUser: ")
         if user_input.lower() in ["quit", "exit"]:
             break
 
-        # Combine System Prompt + User Question
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_input}
         ]
-        
-        # Format for Qwen
-        text = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
+        messages.extend(history)
+        messages.append({"role": "user", "content": user_input})
 
+        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = tokenizer(text, return_tensors="pt").to("cuda")
+        input_length = inputs["input_ids"].shape[-1]
 
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=256,
+                max_new_tokens=1024,
                 temperature=0.3,
                 top_p=0.9,
                 do_sample=True,
-                pad_token_id=tokenizer.eos_token_id
+                pad_token_id=tokenizer.eos_token_id,
             )
-        
-        # Clean Output
-        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        if "assistant" in response:
-            clean_response = response.split("assistant")[-1].strip()
+
+        new_ids = outputs[0][input_length:]
+        raw = tokenizer.decode(new_ids, skip_special_tokens=True).strip()
+
+        parsed = parse_model_output(raw)
+        if parsed:
+            print(f"\nFINA: {parsed.message}")
+            if parsed.action:
+                print(f"  Action: {parsed.action.type} {parsed.action.arguments.model_dump()}")
+            if parsed.signals:
+                print(f"  Signals: {parsed.signals}")
         else:
-            clean_response = response
-            
-        print(f"FINA: {clean_response}")
+            print(f"\nFINA (raw): {raw}")
+
+        # Track history
+        history.append({"role": "user", "content": user_input})
+        history.append({"role": "assistant", "content": raw})
+
 
 if __name__ == "__main__":
     chat()

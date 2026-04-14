@@ -1,0 +1,1150 @@
+{
+  "source": "benchmark_2026-04-14_142119.json",
+  "adapter": "financial_qwen_native_v7",
+  "overall": {
+    "overall_accuracy_pct": 62.8,
+    "total_checks_passed": 314,
+    "total_checks": 500
+  },
+  "dataset_lines": 5463,
+  "dataset_families": {
+    "action_crud": 1885,
+    "context_analysis": 1090,
+    "hard_negative": 816,
+    "clarification": 570,
+    "role_specific": 555,
+    "multi_turn": 547
+  },
+  "by_family": {
+    "Budget Health — Student, tight budget": [
+      {
+        "id": "TC01",
+        "name": "Budget Health — Student, tight budget",
+        "score_pct": 25.0
+      }
+    ],
+    "Budget Health — Student, comfortable": [
+      {
+        "id": "TC02",
+        "name": "Budget Health — Student, comfortable",
+        "score_pct": 50.0
+      }
+    ],
+    "Budget Health — Student, over budget": [
+      {
+        "id": "TC03",
+        "name": "Budget Health — Student, over budget",
+        "score_pct": 75.0
+      }
+    ],
+    "Budget Health — Worker, balanced": [
+      {
+        "id": "TC04",
+        "name": "Budget Health — Worker, balanced",
+        "score_pct": 50.0
+      }
+    ],
+    "Budget Health — Worker, high earner": [
+      {
+        "id": "TC05",
+        "name": "Budget Health — Worker, high earner",
+        "score_pct": 50.0
+      }
+    ],
+    "Budget Health — Freelancer, low month": [
+      {
+        "id": "TC06",
+        "name": "Budget Health — Freelancer, low month",
+        "score_pct": 50.0
+      }
+    ],
+    "Budget Health — Freelancer, good month": [
+      {
+        "id": "TC07",
+        "name": "Budget Health — Freelancer, good month",
+        "score_pct": 50.0
+      }
+    ],
+    "Budget Health — Worker, paycheck to paycheck": [
+      {
+        "id": "TC08",
+        "name": "Budget Health — Worker, paycheck to paycheck",
+        "score_pct": 50.0
+      }
+    ],
+    "Budget Health — Student, scholarship income": [
+      {
+        "id": "TC09",
+        "name": "Budget Health — Student, scholarship income",
+        "score_pct": 25.0
+      }
+    ],
+    "Budget Health — Freelancer, multiple clients": [
+      {
+        "id": "TC10",
+        "name": "Budget Health — Freelancer, multiple clients",
+        "score_pct": 25.0
+      }
+    ],
+    "Budget Health — Worker, new job": [
+      {
+        "id": "TC11",
+        "name": "Budget Health — Worker, new job",
+        "score_pct": 20.0
+      }
+    ],
+    "Budget Health — Student, minimal spending": [
+      {
+        "id": "TC12",
+        "name": "Budget Health — Student, minimal spending",
+        "score_pct": 75.0
+      }
+    ],
+    "Custom Split 60/25/15 — Worker": [
+      {
+        "id": "TC13",
+        "name": "Custom Split 60/25/15 — Worker",
+        "score_pct": 100.0
+      }
+    ],
+    "Custom Split 70/20/10 — Student": [
+      {
+        "id": "TC14",
+        "name": "Custom Split 70/20/10 — Student",
+        "score_pct": 50.0
+      }
+    ],
+    "Custom Split 40/30/30 — Freelancer": [
+      {
+        "id": "TC15",
+        "name": "Custom Split 40/30/30 — Freelancer",
+        "score_pct": 25.0
+      }
+    ],
+    "Custom Split 80/10/10 — Worker": [
+      {
+        "id": "TC16",
+        "name": "Custom Split 80/10/10 — Worker",
+        "score_pct": 25.0
+      }
+    ],
+    "Custom Split 50/30/20 explicit — Student": [
+      {
+        "id": "TC17",
+        "name": "Custom Split 50/30/20 explicit — Student",
+        "score_pct": 100.0
+      }
+    ],
+    "Custom Split 55/25/20 — Freelancer": [
+      {
+        "id": "TC18",
+        "name": "Custom Split 55/25/20 — Freelancer",
+        "score_pct": 75.0
+      }
+    ],
+    "Custom Split 30/30/40 — Worker savings focus": [
+      {
+        "id": "TC19",
+        "name": "Custom Split 30/30/40 — Worker savings focus",
+        "score_pct": 25.0
+      }
+    ],
+    "Custom Split 65/20/15 — Student part-time": [
+      {
+        "id": "TC20",
+        "name": "Custom Split 65/20/15 — Student part-time",
+        "score_pct": 25.0
+      }
+    ],
+    "Custom Split 50/20/30 — Freelancer": [
+      {
+        "id": "TC21",
+        "name": "Custom Split 50/20/30 — Freelancer",
+        "score_pct": 75.0
+      }
+    ],
+    "Custom Split 45/35/20 — Worker": [
+      {
+        "id": "TC22",
+        "name": "Custom Split 45/35/20 — Worker",
+        "score_pct": 0.0
+      }
+    ],
+    "Tax — Freelancer, standard": [
+      {
+        "id": "TC23",
+        "name": "Tax — Freelancer, standard",
+        "score_pct": 50.0
+      }
+    ],
+    "Tax — Freelancer, high income": [
+      {
+        "id": "TC24",
+        "name": "Tax — Freelancer, high income",
+        "score_pct": 75.0
+      }
+    ],
+    "Tax — Freelancer, low income": [
+      {
+        "id": "TC25",
+        "name": "Tax — Freelancer, low income",
+        "score_pct": 66.67
+      }
+    ],
+    "Tax — Freelancer, deductions question": [
+      {
+        "id": "TC26",
+        "name": "Tax — Freelancer, deductions question",
+        "score_pct": 75.0
+      }
+    ],
+    "Tax — Worker, tax on salary": [
+      {
+        "id": "TC27",
+        "name": "Tax — Worker, tax on salary",
+        "score_pct": 66.67
+      }
+    ],
+    "Tax — Freelancer, quarterly planning": [
+      {
+        "id": "TC28",
+        "name": "Tax — Freelancer, quarterly planning",
+        "score_pct": 50.0
+      }
+    ],
+    "Tax — Student, part-time tax": [
+      {
+        "id": "TC29",
+        "name": "Tax — Student, part-time tax",
+        "score_pct": 33.33
+      }
+    ],
+    "Tax — Freelancer, mid range": [
+      {
+        "id": "TC30",
+        "name": "Tax — Freelancer, mid range",
+        "score_pct": 50.0
+      }
+    ],
+    "Log — Student, coffee": [
+      {
+        "id": "TC31",
+        "name": "Log — Student, coffee",
+        "score_pct": 100.0
+      }
+    ],
+    "Log — Worker, grocery": [
+      {
+        "id": "TC32",
+        "name": "Log — Worker, grocery",
+        "score_pct": 100.0
+      }
+    ],
+    "Log — Student, transport": [
+      {
+        "id": "TC33",
+        "name": "Log — Student, transport",
+        "score_pct": 100.0
+      }
+    ],
+    "Log — Freelancer, equipment": [
+      {
+        "id": "TC34",
+        "name": "Log — Freelancer, equipment",
+        "score_pct": 75.0
+      }
+    ],
+    "Log — Worker, dining": [
+      {
+        "id": "TC35",
+        "name": "Log — Worker, dining",
+        "score_pct": 100.0
+      }
+    ],
+    "Log — Student, entertainment": [
+      {
+        "id": "TC36",
+        "name": "Log — Student, entertainment",
+        "score_pct": 100.0
+      }
+    ],
+    "Log — Freelancer, software subscription": [
+      {
+        "id": "TC37",
+        "name": "Log — Freelancer, software subscription",
+        "score_pct": 100.0
+      }
+    ],
+    "Log — Worker, bill payment": [
+      {
+        "id": "TC38",
+        "name": "Log — Worker, bill payment",
+        "score_pct": 100.0
+      }
+    ],
+    "Log — Student, textbook": [
+      {
+        "id": "TC39",
+        "name": "Log — Student, textbook",
+        "score_pct": 100.0
+      }
+    ],
+    "Log — Freelancer, coworking": [
+      {
+        "id": "TC40",
+        "name": "Log — Freelancer, coworking",
+        "score_pct": 100.0
+      }
+    ],
+    "Log — Worker, health expense": [
+      {
+        "id": "TC41",
+        "name": "Log — Worker, health expense",
+        "score_pct": 100.0
+      }
+    ],
+    "Log — Student, large purchase": [
+      {
+        "id": "TC42",
+        "name": "Log — Student, large purchase",
+        "score_pct": 100.0
+      }
+    ],
+    "Emergency Fund — Worker, standard": [
+      {
+        "id": "TC43",
+        "name": "Emergency Fund — Worker, standard",
+        "score_pct": 25.0
+      }
+    ],
+    "Emergency Fund — Freelancer, irregular income": [
+      {
+        "id": "TC44",
+        "name": "Emergency Fund — Freelancer, irregular income",
+        "score_pct": 25.0
+      }
+    ],
+    "Emergency Fund — Student, small income": [
+      {
+        "id": "TC45",
+        "name": "Emergency Fund — Student, small income",
+        "score_pct": 75.0
+      }
+    ],
+    "Emergency Fund — Worker, high expenses": [
+      {
+        "id": "TC46",
+        "name": "Emergency Fund — Worker, high expenses",
+        "score_pct": 0.0
+      }
+    ],
+    "Emergency Fund — Freelancer, starting out": [
+      {
+        "id": "TC47",
+        "name": "Emergency Fund — Freelancer, starting out",
+        "score_pct": 75.0
+      }
+    ],
+    "Emergency Fund — Worker, family": [
+      {
+        "id": "TC48",
+        "name": "Emergency Fund — Worker, family",
+        "score_pct": 0.0
+      }
+    ],
+    "Emergency Fund — Student, dorm life": [
+      {
+        "id": "TC49",
+        "name": "Emergency Fund — Student, dorm life",
+        "score_pct": 50.0
+      }
+    ],
+    "Emergency Fund — Freelancer, high earner": [
+      {
+        "id": "TC50",
+        "name": "Emergency Fund — Freelancer, high earner",
+        "score_pct": 75.0
+      }
+    ],
+    "Saving Tips — Student, basic": [
+      {
+        "id": "TC51",
+        "name": "Saving Tips — Student, basic",
+        "score_pct": 75.0
+      }
+    ],
+    "Saving Tips — Freelancer, business": [
+      {
+        "id": "TC52",
+        "name": "Saving Tips — Freelancer, business",
+        "score_pct": 100.0
+      }
+    ],
+    "Saving Tips — Worker, mid salary": [
+      {
+        "id": "TC53",
+        "name": "Saving Tips — Worker, mid salary",
+        "score_pct": 75.0
+      }
+    ],
+    "Saving Tips — Student, food focus": [
+      {
+        "id": "TC54",
+        "name": "Saving Tips — Student, food focus",
+        "score_pct": 75.0
+      }
+    ],
+    "Saving Tips — Freelancer, tax savings": [
+      {
+        "id": "TC55",
+        "name": "Saving Tips — Freelancer, tax savings",
+        "score_pct": 75.0
+      }
+    ],
+    "Saving Tips — Worker, high earner": [
+      {
+        "id": "TC56",
+        "name": "Saving Tips — Worker, high earner",
+        "score_pct": 75.0
+      }
+    ],
+    "Saving Tips — Student, zero savings": [
+      {
+        "id": "TC57",
+        "name": "Saving Tips — Student, zero savings",
+        "score_pct": 25.0
+      }
+    ],
+    "Saving Tips — Freelancer, separate accounts": [
+      {
+        "id": "TC58",
+        "name": "Saving Tips — Freelancer, separate accounts",
+        "score_pct": 25.0
+      }
+    ],
+    "Saving Tips — Worker, automate": [
+      {
+        "id": "TC59",
+        "name": "Saving Tips — Worker, automate",
+        "score_pct": 100.0
+      }
+    ],
+    "Saving Tips — Student, discount hunter": [
+      {
+        "id": "TC60",
+        "name": "Saving Tips — Student, discount hunter",
+        "score_pct": 75.0
+      }
+    ],
+    "Overspend — Student, entertainment": [
+      {
+        "id": "TC61",
+        "name": "Overspend — Student, entertainment",
+        "score_pct": 75.0
+      }
+    ],
+    "Overspend — Worker, shopping": [
+      {
+        "id": "TC62",
+        "name": "Overspend — Worker, shopping",
+        "score_pct": 100.0
+      }
+    ],
+    "Overspend — Freelancer, equipment": [
+      {
+        "id": "TC63",
+        "name": "Overspend — Freelancer, equipment",
+        "score_pct": 100.0
+      }
+    ],
+    "Overspend — Student, food heavy": [
+      {
+        "id": "TC64",
+        "name": "Overspend — Student, food heavy",
+        "score_pct": 75.0
+      }
+    ],
+    "Overspend — Worker, bills": [
+      {
+        "id": "TC65",
+        "name": "Overspend — Worker, bills",
+        "score_pct": 50.0
+      }
+    ],
+    "Overspend — Freelancer, transport": [
+      {
+        "id": "TC66",
+        "name": "Overspend — Freelancer, transport",
+        "score_pct": 75.0
+      }
+    ],
+    "Overspend — Student, total over income": [
+      {
+        "id": "TC67",
+        "name": "Overspend — Student, total over income",
+        "score_pct": 50.0
+      }
+    ],
+    "Overspend — Worker, dining out": [
+      {
+        "id": "TC68",
+        "name": "Overspend — Worker, dining out",
+        "score_pct": 75.0
+      }
+    ],
+    "Overspend — Freelancer, entertainment heavy": [
+      {
+        "id": "TC69",
+        "name": "Overspend — Freelancer, entertainment heavy",
+        "score_pct": 100.0
+      }
+    ],
+    "Overspend — Worker, across the board": [
+      {
+        "id": "TC70",
+        "name": "Overspend — Worker, across the board",
+        "score_pct": 50.0
+      }
+    ],
+    "Goal — Worker, motorbike": [
+      {
+        "id": "TC71",
+        "name": "Goal — Worker, motorbike",
+        "score_pct": 50.0
+      }
+    ],
+    "Goal — Student, laptop": [
+      {
+        "id": "TC72",
+        "name": "Goal — Student, laptop",
+        "score_pct": 75.0
+      }
+    ],
+    "Goal — Freelancer, vacation": [
+      {
+        "id": "TC73",
+        "name": "Goal — Freelancer, vacation",
+        "score_pct": 75.0
+      }
+    ],
+    "Goal — Worker, wedding fund": [
+      {
+        "id": "TC74",
+        "name": "Goal — Worker, wedding fund",
+        "score_pct": 75.0
+      }
+    ],
+    "Goal — Student, phone": [
+      {
+        "id": "TC75",
+        "name": "Goal — Student, phone",
+        "score_pct": 50.0
+      }
+    ],
+    "Goal — Freelancer, business investment": [
+      {
+        "id": "TC76",
+        "name": "Goal — Freelancer, business investment",
+        "score_pct": 50.0
+      }
+    ],
+    "Goal — Worker, car": [
+      {
+        "id": "TC77",
+        "name": "Goal — Worker, car",
+        "score_pct": 50.0
+      }
+    ],
+    "Goal — Student, travel": [
+      {
+        "id": "TC78",
+        "name": "Goal — Student, travel",
+        "score_pct": 100.0
+      }
+    ],
+    "Goal — Freelancer, home deposit": [
+      {
+        "id": "TC79",
+        "name": "Goal — Freelancer, home deposit",
+        "score_pct": 75.0
+      }
+    ],
+    "Goal — Worker, education fund": [
+      {
+        "id": "TC80",
+        "name": "Goal — Worker, education fund",
+        "score_pct": 50.0
+      }
+    ],
+    "Debt — Student, borrowed money": [
+      {
+        "id": "TC81",
+        "name": "Debt — Student, borrowed money",
+        "score_pct": 50.0
+      }
+    ],
+    "Debt — Worker, credit card": [
+      {
+        "id": "TC82",
+        "name": "Debt — Worker, credit card",
+        "score_pct": 75.0
+      }
+    ],
+    "Debt — Freelancer, business loan": [
+      {
+        "id": "TC83",
+        "name": "Debt — Freelancer, business loan",
+        "score_pct": 25.0
+      }
+    ],
+    "Debt — Student, student loan": [
+      {
+        "id": "TC84",
+        "name": "Debt — Student, student loan",
+        "score_pct": 50.0
+      }
+    ],
+    "Debt — Worker, multiple debts": [
+      {
+        "id": "TC85",
+        "name": "Debt — Worker, multiple debts",
+        "score_pct": 75.0
+      }
+    ],
+    "Debt — Freelancer, tax debt": [
+      {
+        "id": "TC86",
+        "name": "Debt — Freelancer, tax debt",
+        "score_pct": 0.0
+      }
+    ],
+    "Invest — Worker, beginner": [
+      {
+        "id": "TC87",
+        "name": "Invest — Worker, beginner",
+        "score_pct": 75.0
+      }
+    ],
+    "Invest — Freelancer, surplus month": [
+      {
+        "id": "TC88",
+        "name": "Invest — Freelancer, surplus month",
+        "score_pct": 50.0
+      }
+    ],
+    "Invest — Worker, employer matching": [
+      {
+        "id": "TC89",
+        "name": "Invest — Worker, employer matching",
+        "score_pct": 75.0
+      }
+    ],
+    "Invest — Student, small amounts": [
+      {
+        "id": "TC90",
+        "name": "Invest — Student, small amounts",
+        "score_pct": 75.0
+      }
+    ],
+    "Invest — Freelancer, retirement": [
+      {
+        "id": "TC91",
+        "name": "Invest — Freelancer, retirement",
+        "score_pct": 50.0
+      }
+    ],
+    "Invest — Worker, salary split": [
+      {
+        "id": "TC92",
+        "name": "Invest — Worker, salary split",
+        "score_pct": 75.0
+      }
+    ],
+    "Income — Student, need more money": [
+      {
+        "id": "TC93",
+        "name": "Income — Student, need more money",
+        "score_pct": 25.0
+      }
+    ],
+    "Income — Freelancer, raise rates": [
+      {
+        "id": "TC94",
+        "name": "Income — Freelancer, raise rates",
+        "score_pct": 50.0
+      }
+    ],
+    "Income — Worker, side income": [
+      {
+        "id": "TC95",
+        "name": "Income — Worker, side income",
+        "score_pct": 75.0
+      }
+    ],
+    "Income — Student, summer job": [
+      {
+        "id": "TC96",
+        "name": "Income — Student, summer job",
+        "score_pct": 25.0
+      }
+    ],
+    "Edge — Very low income student": [
+      {
+        "id": "TC97",
+        "name": "Edge — Very low income student",
+        "score_pct": 50.0
+      }
+    ],
+    "Edge — High income worker, no direction": [
+      {
+        "id": "TC98",
+        "name": "Edge — High income worker, no direction",
+        "score_pct": 40.0
+      }
+    ],
+    "Edge — Freelancer, zero savings": [
+      {
+        "id": "TC99",
+        "name": "Edge — Freelancer, zero savings",
+        "score_pct": 80.0
+      }
+    ],
+    "Edge — Worker, financial review request": [
+      {
+        "id": "TC100",
+        "name": "Edge — Worker, financial review request",
+        "score_pct": 83.33
+      }
+    ],
+    "Goal — Student, laptop goal on track": [
+      {
+        "id": "TC101",
+        "name": "Goal — Student, laptop goal on track",
+        "score_pct": 100.0
+      }
+    ],
+    "Goal — Worker, emergency fund behind": [
+      {
+        "id": "TC102",
+        "name": "Goal — Worker, emergency fund behind",
+        "score_pct": 33.33
+      }
+    ],
+    "Goal — Freelancer, Tết savings": [
+      {
+        "id": "TC103",
+        "name": "Goal — Freelancer, Tết savings",
+        "score_pct": 100.0
+      }
+    ],
+    "Balance — Worker, total balance check": [
+      {
+        "id": "TC107",
+        "name": "Balance — Worker, total balance check",
+        "score_pct": 100.0
+      }
+    ],
+    "Balance — Student, can I afford now?": [
+      {
+        "id": "TC108",
+        "name": "Balance — Student, can I afford now?",
+        "score_pct": 33.33
+      }
+    ],
+    "Forecast — Worker, spending increase warning": [
+      {
+        "id": "TC111",
+        "name": "Forecast — Worker, spending increase warning",
+        "score_pct": 66.67
+      }
+    ],
+    "Forecast — Freelancer, stable spending": [
+      {
+        "id": "TC112",
+        "name": "Forecast — Freelancer, stable spending",
+        "score_pct": 66.67
+      }
+    ],
+    "Verdict — High savings correctly praised": [
+      {
+        "id": "TC115",
+        "name": "Verdict — High savings correctly praised",
+        "score_pct": 66.67
+      }
+    ],
+    "Verdict — Low savings correctly warned": [
+      {
+        "id": "TC116",
+        "name": "Verdict — Low savings correctly warned",
+        "score_pct": 66.67
+      }
+    ],
+    "Verdict — Deficit correctly identified": [
+      {
+        "id": "TC117",
+        "name": "Verdict — Deficit correctly identified",
+        "score_pct": 66.67
+      }
+    ],
+    "Verdict — 78% savings rate not called low": [
+      {
+        "id": "TC118",
+        "name": "Verdict — 78% savings rate not called low",
+        "score_pct": 75.0
+      }
+    ],
+    "No category budget → nudge to set up": [
+      {
+        "id": "TC201",
+        "name": "No category budget → nudge to set up",
+        "score_pct": 0.0
+      }
+    ],
+    "Has category budgets — references over limit": [
+      {
+        "id": "TC202",
+        "name": "Has category budgets — references over limit",
+        "score_pct": 100.0
+      }
+    ],
+    "No category budget — overview still works": [
+      {
+        "id": "TC203",
+        "name": "No category budget — overview still works",
+        "score_pct": 33.33
+      }
+    ],
+    "Category budget — near limit warning": [
+      {
+        "id": "TC204",
+        "name": "Category budget — near limit warning",
+        "score_pct": 50.0
+      }
+    ],
+    "Category budget — all OK praise": [
+      {
+        "id": "TC205",
+        "name": "Category budget — all OK praise",
+        "score_pct": 100.0
+      }
+    ],
+    "Category budget — single big overspend": [
+      {
+        "id": "TC206",
+        "name": "Category budget — single big overspend",
+        "score_pct": 33.33
+      }
+    ],
+    "Log transaction — coffee expense": [
+      {
+        "id": "TC301",
+        "name": "Log transaction — coffee expense",
+        "score_pct": 50.0
+      }
+    ],
+    "Log transaction — grocery shopping": [
+      {
+        "id": "TC302",
+        "name": "Log transaction — grocery shopping",
+        "score_pct": 50.0
+      }
+    ],
+    "Log transaction — equipment purchase": [
+      {
+        "id": "TC303",
+        "name": "Log transaction — equipment purchase",
+        "score_pct": 50.0
+      }
+    ],
+    "Spending question — no action tag (negative)": [
+      {
+        "id": "TC304",
+        "name": "Spending question — no action tag (negative)",
+        "score_pct": 100.0
+      }
+    ],
+    "Budget question — no action tag (negative)": [
+      {
+        "id": "TC305",
+        "name": "Budget question — no action tag (negative)",
+        "score_pct": 100.0
+      }
+    ],
+    "Log transaction — dinner with clients": [
+      {
+        "id": "TC306",
+        "name": "Log transaction — dinner with clients",
+        "score_pct": 50.0
+      }
+    ],
+    "MoM — Food went up 30%": [
+      {
+        "id": "TC307",
+        "name": "MoM — Food went up 30%",
+        "score_pct": 100.0
+      }
+    ],
+    "MoM — overall spending down": [
+      {
+        "id": "TC308",
+        "name": "MoM — overall spending down",
+        "score_pct": 100.0
+      }
+    ],
+    "MoM — new category appeared": [
+      {
+        "id": "TC309",
+        "name": "MoM — new category appeared",
+        "score_pct": 50.0
+      }
+    ],
+    "MoM — stable spending": [
+      {
+        "id": "TC310",
+        "name": "MoM — stable spending",
+        "score_pct": 100.0
+      }
+    ],
+    "MoM — Entertainment doubled": [
+      {
+        "id": "TC311",
+        "name": "MoM — Entertainment doubled",
+        "score_pct": 100.0
+      }
+    ],
+    "MoM — specific category query": [
+      {
+        "id": "TC312",
+        "name": "MoM — specific category query",
+        "score_pct": 100.0
+      }
+    ],
+    "Recurring — list fixed costs": [
+      {
+        "id": "TC313",
+        "name": "Recurring — list fixed costs",
+        "score_pct": 100.0
+      }
+    ],
+    "Recurring — no recurring detected": [
+      {
+        "id": "TC314",
+        "name": "Recurring — no recurring detected",
+        "score_pct": 0.0
+      }
+    ],
+    "Recurring — what can I cut": [
+      {
+        "id": "TC315",
+        "name": "Recurring — what can I cut",
+        "score_pct": 50.0
+      }
+    ],
+    "Recurring — high fixed costs": [
+      {
+        "id": "TC316",
+        "name": "Recurring — high fixed costs",
+        "score_pct": 0.0
+      }
+    ],
+    "Recurring — subscription list": [
+      {
+        "id": "TC317",
+        "name": "Recurring — subscription list",
+        "score_pct": 100.0
+      }
+    ],
+    "Recurring — fixed vs discretionary split": [
+      {
+        "id": "TC318",
+        "name": "Recurring — fixed vs discretionary split",
+        "score_pct": 100.0
+      }
+    ],
+    "Anomaly — Shopping 2.5x average": [
+      {
+        "id": "TC319",
+        "name": "Anomaly — Shopping 2.5x average",
+        "score_pct": 50.0
+      }
+    ],
+    "Anomaly — no anomalies (negative)": [
+      {
+        "id": "TC320",
+        "name": "Anomaly — no anomalies (negative)",
+        "score_pct": 0.0
+      }
+    ],
+    "Anomaly — two anomalies (Food + Entertainment)": [
+      {
+        "id": "TC321",
+        "name": "Anomaly — two anomalies (Food + Entertainment)",
+        "score_pct": 50.0
+      }
+    ],
+    "Anomaly — mild WATCH on Transport": [
+      {
+        "id": "TC322",
+        "name": "Anomaly — mild WATCH on Transport",
+        "score_pct": 50.0
+      }
+    ],
+    "Anomaly — proactive in general question": [
+      {
+        "id": "TC323",
+        "name": "Anomaly — proactive in general question",
+        "score_pct": 50.0
+      }
+    ],
+    "Anomaly — UNUSUAL + WATCH distinction": [
+      {
+        "id": "TC324",
+        "name": "Anomaly — UNUSUAL + WATCH distinction",
+        "score_pct": 33.33
+      }
+    ]
+  },
+  "family_averages": {
+    "Budget Health — Student, tight budget": 25.0,
+    "Budget Health — Student, comfortable": 50.0,
+    "Budget Health — Student, over budget": 75.0,
+    "Budget Health — Worker, balanced": 50.0,
+    "Budget Health — Worker, high earner": 50.0,
+    "Budget Health — Freelancer, low month": 50.0,
+    "Budget Health — Freelancer, good month": 50.0,
+    "Budget Health — Worker, paycheck to paycheck": 50.0,
+    "Budget Health — Student, scholarship income": 25.0,
+    "Budget Health — Freelancer, multiple clients": 25.0,
+    "Budget Health — Worker, new job": 20.0,
+    "Budget Health — Student, minimal spending": 75.0,
+    "Custom Split 60/25/15 — Worker": 100.0,
+    "Custom Split 70/20/10 — Student": 50.0,
+    "Custom Split 40/30/30 — Freelancer": 25.0,
+    "Custom Split 80/10/10 — Worker": 25.0,
+    "Custom Split 50/30/20 explicit — Student": 100.0,
+    "Custom Split 55/25/20 — Freelancer": 75.0,
+    "Custom Split 30/30/40 — Worker savings focus": 25.0,
+    "Custom Split 65/20/15 — Student part-time": 25.0,
+    "Custom Split 50/20/30 — Freelancer": 75.0,
+    "Custom Split 45/35/20 — Worker": 0.0,
+    "Tax — Freelancer, standard": 50.0,
+    "Tax — Freelancer, high income": 75.0,
+    "Tax — Freelancer, low income": 66.7,
+    "Tax — Freelancer, deductions question": 75.0,
+    "Tax — Worker, tax on salary": 66.7,
+    "Tax — Freelancer, quarterly planning": 50.0,
+    "Tax — Student, part-time tax": 33.3,
+    "Tax — Freelancer, mid range": 50.0,
+    "Log — Student, coffee": 100.0,
+    "Log — Worker, grocery": 100.0,
+    "Log — Student, transport": 100.0,
+    "Log — Freelancer, equipment": 75.0,
+    "Log — Worker, dining": 100.0,
+    "Log — Student, entertainment": 100.0,
+    "Log — Freelancer, software subscription": 100.0,
+    "Log — Worker, bill payment": 100.0,
+    "Log — Student, textbook": 100.0,
+    "Log — Freelancer, coworking": 100.0,
+    "Log — Worker, health expense": 100.0,
+    "Log — Student, large purchase": 100.0,
+    "Emergency Fund — Worker, standard": 25.0,
+    "Emergency Fund — Freelancer, irregular income": 25.0,
+    "Emergency Fund — Student, small income": 75.0,
+    "Emergency Fund — Worker, high expenses": 0.0,
+    "Emergency Fund — Freelancer, starting out": 75.0,
+    "Emergency Fund — Worker, family": 0.0,
+    "Emergency Fund — Student, dorm life": 50.0,
+    "Emergency Fund — Freelancer, high earner": 75.0,
+    "Saving Tips — Student, basic": 75.0,
+    "Saving Tips — Freelancer, business": 100.0,
+    "Saving Tips — Worker, mid salary": 75.0,
+    "Saving Tips — Student, food focus": 75.0,
+    "Saving Tips — Freelancer, tax savings": 75.0,
+    "Saving Tips — Worker, high earner": 75.0,
+    "Saving Tips — Student, zero savings": 25.0,
+    "Saving Tips — Freelancer, separate accounts": 25.0,
+    "Saving Tips — Worker, automate": 100.0,
+    "Saving Tips — Student, discount hunter": 75.0,
+    "Overspend — Student, entertainment": 75.0,
+    "Overspend — Worker, shopping": 100.0,
+    "Overspend — Freelancer, equipment": 100.0,
+    "Overspend — Student, food heavy": 75.0,
+    "Overspend — Worker, bills": 50.0,
+    "Overspend — Freelancer, transport": 75.0,
+    "Overspend — Student, total over income": 50.0,
+    "Overspend — Worker, dining out": 75.0,
+    "Overspend — Freelancer, entertainment heavy": 100.0,
+    "Overspend — Worker, across the board": 50.0,
+    "Goal — Worker, motorbike": 50.0,
+    "Goal — Student, laptop": 75.0,
+    "Goal — Freelancer, vacation": 75.0,
+    "Goal — Worker, wedding fund": 75.0,
+    "Goal — Student, phone": 50.0,
+    "Goal — Freelancer, business investment": 50.0,
+    "Goal — Worker, car": 50.0,
+    "Goal — Student, travel": 100.0,
+    "Goal — Freelancer, home deposit": 75.0,
+    "Goal — Worker, education fund": 50.0,
+    "Debt — Student, borrowed money": 50.0,
+    "Debt — Worker, credit card": 75.0,
+    "Debt — Freelancer, business loan": 25.0,
+    "Debt — Student, student loan": 50.0,
+    "Debt — Worker, multiple debts": 75.0,
+    "Debt — Freelancer, tax debt": 0.0,
+    "Invest — Worker, beginner": 75.0,
+    "Invest — Freelancer, surplus month": 50.0,
+    "Invest — Worker, employer matching": 75.0,
+    "Invest — Student, small amounts": 75.0,
+    "Invest — Freelancer, retirement": 50.0,
+    "Invest — Worker, salary split": 75.0,
+    "Income — Student, need more money": 25.0,
+    "Income — Freelancer, raise rates": 50.0,
+    "Income — Worker, side income": 75.0,
+    "Income — Student, summer job": 25.0,
+    "Edge — Very low income student": 50.0,
+    "Edge — High income worker, no direction": 40.0,
+    "Edge — Freelancer, zero savings": 80.0,
+    "Edge — Worker, financial review request": 83.3,
+    "Goal — Student, laptop goal on track": 100.0,
+    "Goal — Worker, emergency fund behind": 33.3,
+    "Goal — Freelancer, Tết savings": 100.0,
+    "Balance — Worker, total balance check": 100.0,
+    "Balance — Student, can I afford now?": 33.3,
+    "Forecast — Worker, spending increase warning": 66.7,
+    "Forecast — Freelancer, stable spending": 66.7,
+    "Verdict — High savings correctly praised": 66.7,
+    "Verdict — Low savings correctly warned": 66.7,
+    "Verdict — Deficit correctly identified": 66.7,
+    "Verdict — 78% savings rate not called low": 75.0,
+    "No category budget → nudge to set up": 0.0,
+    "Has category budgets — references over limit": 100.0,
+    "No category budget — overview still works": 33.3,
+    "Category budget — near limit warning": 50.0,
+    "Category budget — all OK praise": 100.0,
+    "Category budget — single big overspend": 33.3,
+    "Log transaction — coffee expense": 50.0,
+    "Log transaction — grocery shopping": 50.0,
+    "Log transaction — equipment purchase": 50.0,
+    "Spending question — no action tag (negative)": 100.0,
+    "Budget question — no action tag (negative)": 100.0,
+    "Log transaction — dinner with clients": 50.0,
+    "MoM — Food went up 30%": 100.0,
+    "MoM — overall spending down": 100.0,
+    "MoM — new category appeared": 50.0,
+    "MoM — stable spending": 100.0,
+    "MoM — Entertainment doubled": 100.0,
+    "MoM — specific category query": 100.0,
+    "Recurring — list fixed costs": 100.0,
+    "Recurring — no recurring detected": 0.0,
+    "Recurring — what can I cut": 50.0,
+    "Recurring — high fixed costs": 0.0,
+    "Recurring — subscription list": 100.0,
+    "Recurring — fixed vs discretionary split": 100.0,
+    "Anomaly — Shopping 2.5x average": 50.0,
+    "Anomaly — no anomalies (negative)": 0.0,
+    "Anomaly — two anomalies (Food + Entertainment)": 50.0,
+    "Anomaly — mild WATCH on Transport": 50.0,
+    "Anomaly — proactive in general question": 50.0,
+    "Anomaly — UNUSUAL + WATCH distinction": 33.3
+  }
+}
