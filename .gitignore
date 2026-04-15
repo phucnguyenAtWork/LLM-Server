@@ -10,6 +10,10 @@ financial_qwen_native_v4/
 financial_qwen_native_v4_checkpoints/
 financial_qwen_native_v5/
 financial_qwen_native_v5_checkpoints/
+financial_qwen_native_v6/
+financial_qwen_native_v6_checkpoints/
+financial_qwen_native_v7/
+financial_qwen_native_v7_checkpoints/
 models/
 
 # Generated/trained artifacts — reproducible, never commit
@@ -26,7 +30,7 @@ hybrid_data.jsonl
 .env.*
 !.env.example
 .agents
-.skills-lock.json
+skills-lock.json
 
 # Python
 __pycache__/
@@ -34,10 +38,12 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+venv_py312_broken/
 venv/
 *.egg-info/
 dist/
 build/
+.tmp/
 
 # Models — local LLM model files are large, never commit
 *.gguf
