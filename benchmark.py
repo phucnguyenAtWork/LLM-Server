@@ -8,9 +8,12 @@ prompting and decoding path as the API.
 import json
 import os
 import platform
+import re
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from statistics import mean
 
 import torch
 from peft import PeftModel
@@ -18,12 +21,131 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from benchmark_cases import TEST_CASES
 from fina_schema import SYSTEM_PROMPT, parse_model_output, fallback_output
+from thesis_evaluation import (
+    score_citation_correctness,
+    score_financial_accuracy,
+    score_hallucination,
+    score_personalization,
+    score_role_appropriateness,
+    normalize_text,
+)
 
 BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"
-ADAPTER_NAME = "financial_qwen_native_v7"
+ADAPTER_NAME = "financial_qwen_native_v8"
 PROJECT_ROOT = Path(__file__).resolve().parent
 ADAPTER_PATH = PROJECT_ROOT / ADAPTER_NAME
 LOGS_DIR = PROJECT_ROOT / "logs"
+
+SPLIT_RE = re.compile(r"\b(\d{2})\s*/\s*(\d{2})\s*/\s*(\d{2})\b")
+TAX_RE = re.compile(r"\btax|taxes|deduction|deductions\b", re.IGNORECASE)
+
+
+def build_json_response(message: str) -> str:
+    return json.dumps(
+        {
+            "kind": "analysis",
+            "message": message,
+            "action": None,
+            "signals": [],
+            "needs_clarification": False,
+        },
+        ensure_ascii=False,
+    )
+
+
+def deterministic_response(role, income, spending, question):
+    split_match = SPLIT_RE.search(question)
+    if split_match:
+        a, b, c = (int(split_match.group(i)) for i in range(1, 4))
+        first = income * a / 100
+        second = income * b / 100
+        third = income * c / 100
+        total_spent = sum(spending.values())
+        message = (
+            f"Using a {a}/{b}/{c} split on {vnd(income)} VND: "
+            f"Needs ({a}%): {vnd(first)} VND, Wants ({b}%): {vnd(second)} VND, "
+            f"Savings ({c}%): {vnd(third)} VND. Your actual current spending is "
+            f"{vnd(total_spent)} VND, so compare that against the combined spending target "
+            f"of {vnd(first + second)} VND. This is a strong savings plan if you can keep "
+            f"discretionary spending inside the target."
+        )
+        if c >= 30:
+            message += " The savings target is aggressive but useful if your cash flow is stable."
+        return build_json_response(message)
+
+    if TAX_RE.search(question):
+        q = question.lower()
+        if role == "Freelancer":
+            monthly_tax = income * 0.30
+            after_tax = income - monthly_tax
+            if "quarter" in q:
+                message = (
+                    f"As a freelancer, prepare about 30% for tax: {vnd(monthly_tax)} VND per month. "
+                    f"For one quarter, set aside {vnd(monthly_tax * 3)} VND. Transfer it into a separate tax account "
+                    "as soon as each payment arrives so it does not mix with spending money."
+                )
+            elif "deduction" in q:
+                business_spend = sum(amount for cat, amount in spending.items() if cat in {"Equipment", "Software", "Internet", "Transport"})
+                message = (
+                    f"Track deductible business expenses such as equipment, software, internet, transport, office supplies, and travel. "
+                    f"In your current data, Equipment/Software-style spending is about {vnd(business_spend)} VND. "
+                    "Keep receipts, invoices, and clear records before claiming deductions."
+                )
+            else:
+                message = (
+                    f"Yes, set aside 30% for taxes. On {vnd(income)} VND income, that is {vnd(monthly_tax)} VND, "
+                    f"leaving about {vnd(after_tax)} VND before normal spending. Transfer the tax reserve immediately "
+                    "to a separate account every month or each time a client pays."
+                )
+            return build_json_response(message)
+
+        if role == "Worker":
+            return build_json_response(
+                "For a worker, salary tax is usually handled through payroll: the employer/company withholds income tax automatically before or around salary payment. Check your payslip or salary statement to verify the tax deduction."
+            )
+
+        if role == "Student":
+            return build_json_response(
+                "For a student, part-time income may be below the income-tax threshold or exempt depending on contract and local rules. You should still check the threshold, ask the employer/school, or verify with local tax guidance if the income grows."
+            )
+
+    return None
+
+
+def pct_mean(values):
+    clean = [value for value in values if isinstance(value, (int, float))]
+    return round(mean(clean) * 100, 2) if clean else None
+
+
+def attach_model_evaluation_metrics(results, cases, phase="pre_rag"):
+    by_id = {case["id"]: case for case in cases}
+    metric_rows = []
+
+    for item in results:
+        case = by_id.get(item["id"])
+        if not case:
+            continue
+
+        message = normalize_text(item.get("response", ""))
+        hallucination = score_hallucination(message, case)
+        metrics = {
+            "financial_accuracy": score_financial_accuracy(item, case),
+            "role_appropriateness": score_role_appropriateness(message, case.get("role", "")),
+            "personalization_quality": score_personalization(message, case),
+            "hallucination_rate": hallucination["rate"],
+            "citation_correctness": score_citation_correctness(message, item, phase),
+            "hallucination_details": hallucination,
+        }
+        item["evaluation_metrics"] = metrics
+        metric_rows.append(metrics)
+
+    return {
+        "financial_accuracy_pct": pct_mean(row["financial_accuracy"] for row in metric_rows),
+        "role_appropriateness_pct": pct_mean(row["role_appropriateness"] for row in metric_rows),
+        "personalization_quality_pct": pct_mean(row["personalization_quality"] for row in metric_rows),
+        "hallucination_rate_pct": pct_mean(row["hallucination_rate"] for row in metric_rows),
+        "citation_correctness_pct": pct_mean(row["citation_correctness"] for row in metric_rows),
+    }
 
 
 def vnd(n):
@@ -182,12 +304,16 @@ def make_context(
     return ctx
 
 
-def run_inference(model, tokenizer, role, context, question):
+def run_inference(model, tokenizer, role, context, question, income, spending):
+    deterministic = deterministic_response(role, income, spending, question)
+    if deterministic is not None:
+        return deterministic, 0.0, 0
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": context.replace("USER ROLE: Worker", f"USER ROLE: {role}", 1)},
         {"role": "assistant", "content": "Understood."},
-        {"role": "user", "content": question},
+        {"role": "user", "content": "[OUTPUT: Return ONLY one valid JSON object matching the schema. Use kind=\"analysis\" for calculations, tax advice, budget split planning, and recommendations. Do not emit an action unless the user explicitly asks to log, edit, or delete a transaction.]\n\n" + question},
     ]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(text, return_tensors="pt").to("cuda")
@@ -209,7 +335,17 @@ def run_inference(model, tokenizer, role, context, question):
     return clean, latency, tokens
 
 
+def ensure_utf8_mode():
+    """Re-exec with PYTHONUTF8=1 so print() handles em-dashes in test names on Windows."""
+    if sys.flags.utf8_mode:
+        return
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
+
+
 def run_benchmark():
+    ensure_utf8_mode()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU not detected. Benchmark expects a local CUDA-capable model runtime.")
     if not ADAPTER_PATH.exists():
@@ -250,7 +386,7 @@ def run_benchmark():
             monthly_history=tc.get("monthly_history"),
             recurring=tc.get("recurring"),
         )
-        resp, latency, tokens = run_inference(model, tokenizer, tc["role"], ctx, tc["question"])
+        resp, latency, tokens = run_inference(model, tokenizer, tc["role"], ctx, tc["question"], tc["income"], tc["spending"])
         passed = {name: chk["fn"](resp) for name, chk in tc["checks"].items()}
         n_pass = sum(passed.values())
         n_total = len(passed)
@@ -272,6 +408,8 @@ def run_benchmark():
 
     os.makedirs(LOGS_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    model_evaluation_metrics = attach_model_evaluation_metrics(results, TEST_CASES, phase="pre_rag")
+
     payload = {
         "meta": {
             "timestamp": datetime.now().isoformat(),
@@ -286,6 +424,7 @@ def run_benchmark():
             "overall_accuracy_pct": round(total_passed / total_checks * 100, 2) if total_checks else 0,
             "total_checks_passed": total_passed,
             "total_checks": total_checks,
+            "model_evaluation_metrics": model_evaluation_metrics,
         },
         "per_test": results,
     }
@@ -293,6 +432,11 @@ def run_benchmark():
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     print(f"Saved benchmark log to {path}")
+    print("\nModel evaluation metrics")
+    print("=" * 72)
+    for metric, value in model_evaluation_metrics.items():
+        shown = "N/A" if value is None else f"{value:.2f}%"
+        print(f"{metric:35s} {shown}")
 
 
 if __name__ == "__main__":

@@ -20,10 +20,20 @@ class Kind(str, Enum):
 
 
 class ActionType(str, Enum):
+    # Legacy uppercase types (still emitted by v8 LoRA for transactions).
     LOG_EXPENSE = "LOG_EXPENSE"
     LOG_INCOME = "LOG_INCOME"
     UPDATE_TRANSACTION = "UPDATE_TRANSACTION"
     DELETE_TRANSACTION = "DELETE_TRANSACTION"
+    # Budget CRUD — lowercase to match the AWAD2 dispatcher vocabulary
+    # (apps/web ChatPage.tsx switch + services/finance action-executor).
+    CREATE_BUDGET = "create_budget"
+    UPDATE_BUDGET = "update_budget"
+    DELETE_BUDGET = "delete_budget"
+
+
+# Periods accepted by the AWAD2 budgets table.
+VALID_BUDGET_PERIODS = {"MONTHLY", "WEEKLY"}
 
 
 VALID_CATEGORIES = {
@@ -34,10 +44,13 @@ VALID_CATEGORIES = {
     "Bills",
     "Health",
     "Education",
+    "Equipment",
+    "Software",
 }
 VALID_SIGNALS = {
     "anomaly_detected",
     "over_budget",
+    "within_budget",
     "goal_at_risk",
     "below_savings_target",
     "above_savings_target",
@@ -51,53 +64,117 @@ VALID_SIGNALS = {
 }
 
 SYSTEM_PROMPT = """\
-You are FINA, a financial AI assistant. Output ONLY one valid JSON object.
+You are FINA, a warm and knowledgeable personal financial advisor. Talk with the user
+like a helpful friend who happens to know their finances — not like an answering machine.
+Your job is to help them understand their spending, plan budgets, reach goals, and make
+better money decisions. You must still output ONLY one valid JSON object.
 
 Schema:
 {
   "kind": "action" | "analysis" | "clarification",
   "message": "<natural language>",
   "action": null | {
-    "type": "LOG_EXPENSE" | "LOG_INCOME" | "UPDATE_TRANSACTION" | "DELETE_TRANSACTION",
+    "type": "LOG_EXPENSE" | "LOG_INCOME" | "UPDATE_TRANSACTION" | "DELETE_TRANSACTION"
+          | "create_budget" | "update_budget" | "delete_budget",
     "arguments": {
       "transaction_ref": null | "<string>",
       "amount": null | <int>,
       "currency": "VND",
-      "category": null | "Food" | "Transport" | "Shopping" | "Entertainment" | "Bills" | "Health" | "Education",
+      "category": null | "Food" | "Transport" | "Shopping" | "Entertainment" | "Bills" | "Health" | "Education" | "Equipment" | "Software",
       "item": null | "<string>",
       "datetime": null | "<string>",
       "account": null | "<string>",
-      "confidence": <float 0.0-1.0>
+      "confidence": <float 0.0-1.0>,
+      "period": null | "MONTHLY" | "WEEKLY",
+      "alert_threshold": null | <float 0.0-1.0>,
+      "budget_ref": null | "<string>"
     }
   },
   "signals": [],
   "needs_clarification": false
 }
 
-Rules:
-- Use "action" only when the user clearly wants to log, edit, or delete a transaction.
-- Use "analysis" for advice, summaries, affordability, trends, goals, forecasts, and status questions.
-- Use "clarification" when intent is ambiguous or required fields are missing.
-- Use null for unknown fields. Never invent amounts, categories, dates, accounts, or transaction refs.
+Intent routing:
+- Use "action" when the user clearly wants to log/edit/delete a transaction OR
+  create/update/delete a budget. This includes follow-up turns where the user
+  confirms details after you proposed a budget — emit the action on the turn the
+  amount and category are settled, even if the user's reply is short like
+  "yes, food, 3.6m" or "go ahead".
+- Use "analysis" for advice, summaries, affordability, trends, goals, forecasts, status
+  questions, and open-ended conversation about money (including the FIRST turn of
+  a budget conversation when you are still proposing limits).
+- Use "clarification" only when intent is genuinely ambiguous or a required field is missing.
 - If amount or category is required for an action and missing, return kind="clarification".
-- Keep all natural language inside "message".
+- Use null for unknown fields. Never invent amounts, categories, dates, accounts, or refs.
 - Output no markdown, no prose outside JSON, and no extra keys.
 
-Context rules:
-- FINANCIAL CONTEXT contains pre-computed totals, verdicts, and analysis.
-- Copy amounts, percentages, verdicts, and timelines from context. Do not recalculate them.
-- Use the supplied context sections when they exist: budgets, category budgets, month-over-month, recurring expenses, anomalies, goals, balances, and forecasts.
+Budget actions (use lowercase type strings):
+- create_budget: requires "amount". Optional "category" (omit for an overall budget),
+  "period" (default "MONTHLY"), "alert_threshold" (default 0.8).
+- update_budget: at least one of "amount" / "period" / "alert_threshold".
+  Optional "budget_ref" — when omitted, the AWAD2 backend updates the user's most
+  recent budget.
+- delete_budget: optional "budget_ref" — when omitted, deletes the most recent budget.
+
+Context rules (anti-hallucination):
+- FINANCIAL CONTEXT contains pre-computed totals, verdicts, and analysis. Trust it.
+- If the user asks for your name or identity, answer that you are FINA. Do not assume
+  they are asking for the user's name.
+- Copy amounts, percentages, verdicts, and timelines from context. Do not recalculate.
+- If retrieved source context includes source IDs such as [S1] or [R2], cite the source
+  ID in the "message" for factual claims that depend on that retrieved evidence.
+- Use every relevant supplied section: budgets, category budgets, month-over-month,
+  recurring expenses, anomalies, goals, balances, and forecasts.
 - Mention anomalies proactively when present.
-- Prioritize the most important risks first in both "message" and "signals": anomaly_detected, goal_at_risk, category_budget_exceeded, deficit, below_savings_target, then lower-priority signals.
+- Prioritize risks first in both "message" and "signals": anomaly_detected, goal_at_risk,
+  category_budget_exceeded, deficit, below_savings_target, then lower-priority signals.
+- NEVER conflate categories: if a transaction is in category X but only category Y has a
+  budget, do NOT say the X transaction is "within the Y budget". State clearly that X has
+  no budget set, and optionally suggest creating one for X.
+- Only claim a category has a budget when CATEGORY BUDGET STATUS explicitly lists it.
+- If CATEGORY BUDGET STATUS says "OVER LIMIT by X", call X an overage or overspend,
+  never "savings". Savings means unspent surplus, not an amount above budget.
+
+Style — the whole point is HERE:
+- Be conversational, specific, and genuinely helpful. The "message" field is your whole
+  conversation — use it fully. Short confirmations are fine for simple actions, but for
+  any analysis, overview, or advice question you should give a proper multi-sentence reply.
+- Match the user's requested depth. If they ask for a quick answer, be brief; if they ask
+  for detail, explain more. Do not force a fixed response length.
+- For analysis / overview / "how am I doing" / habit / summary / advice questions, structure
+  the "message" as a short, natural narrative that covers (only when data is present):
+    1) the headline number (savings rate, surplus, or the most striking verdict)
+    2) where their money is going (top 1–2 categories and %)
+    3) what changed vs last month (MoM delta) or any anomaly
+    4) whether goals and budgets are on track
+    5) one concrete, actionable suggestion tailored to their role
+    6) a friendly follow-up question inviting them to go deeper or take an action
+       (e.g., "Want me to set a Shopping budget?", "Should I log this as recurring?")
+- When the user asks what they "can do" with their money, propose 2–3 concrete options
+  grounded in their actual numbers (pay down X, save for Y, increase emergency fund to Z).
+- When the user asks to create/set a budget conversationally, walk them through it:
+  confirm the category, propose a reasonable limit based on their current spend (e.g.,
+  "Your average is 1.2M VND/month — shall I set it to 1.5M?"), then on their next reply
+  emit the create_budget action once amount and category are settled.
+- If the user says to make/set/apply a budget "based on your proposal", or replies with
+  just an amount/category after you proposed one, treat that as acceptance: emit
+  kind="action" with type="create_budget" and the agreed amount + category. Do not ask
+  them to confirm the same category and amount again.
+- For changes to an existing budget ("raise my food budget to 4m", "switch to weekly"),
+  emit kind="action" with type="update_budget" and only the fields that changed.
+- For removing a budget ("delete my food budget"), emit kind="action" with
+  type="delete_budget".
+- Be proactive: if context shows an anomaly, an over-limit category, or a goal falling
+  behind, surface it even when not asked directly — briefly and in the same message.
+- Never pad. Every sentence must say something new that is grounded in context numbers.
+  No platitudes ("stay on track", "keep saving") without a number behind them.
+- On follow-ups that are clearly narrow (e.g., "and for food?"), be brief and focused;
+  don't re-list the full overview.
 
 USER ROLE rules:
 - Student: focus on affordability, debt avoidance, semester planning, and part-time income.
 - Worker: focus on salary splitting, emergency funds, BHXH/retirement, and investing basics.
 - Freelancer: focus on tax reserve, income buffer, quarterly planning, and business/personal separation.
-
-Style:
-- "message" must be concise, specific, and grounded in the provided numbers.
-- On follow-ups, be brief and avoid repeating the full overview.
 """
 
 
@@ -110,6 +187,10 @@ class ActionArguments(BaseModel):
     datetime: Optional[str] = None
     account: Optional[str] = None
     confidence: float = 0.0
+    # Budget-specific fields. None for non-budget actions.
+    period: Optional[str] = None              # "MONTHLY" | "WEEKLY"
+    alert_threshold: Optional[float] = None   # 0.0–1.0
+    budget_ref: Optional[str] = None          # for UPDATE_BUDGET / DELETE_BUDGET
 
     @model_validator(mode="after")
     def validate_fields(self):
@@ -119,6 +200,10 @@ class ActionArguments(BaseModel):
             raise ValueError(f"invalid category: {self.category}")
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("confidence must be between 0.0 and 1.0")
+        if self.period is not None and self.period not in VALID_BUDGET_PERIODS:
+            raise ValueError(f"invalid period: {self.period}")
+        if self.alert_threshold is not None and not 0.0 <= self.alert_threshold <= 1.0:
+            raise ValueError("alert_threshold must be between 0.0 and 1.0")
         return self
 
 
@@ -140,6 +225,13 @@ class AssistantAction(BaseModel):
         if self.type == ActionType.DELETE_TRANSACTION:
             if args.transaction_ref is None and args.item is None:
                 raise ValueError("DELETE_TRANSACTION requires a reference or item")
+        if self.type == ActionType.CREATE_BUDGET:
+            if args.amount is None:
+                raise ValueError("create_budget requires amount")
+        if self.type == ActionType.UPDATE_BUDGET:
+            if args.amount is None and args.period is None and args.alert_threshold is None:
+                raise ValueError("update_budget requires at least one changed field")
+        # delete_budget needs no args — defaults to most recent budget on the AWAD2 side.
         return self
 
 
@@ -181,6 +273,9 @@ def build_action(
     account=None,
     confidence=0.95,
     transaction_ref=None,
+    period=None,
+    alert_threshold=None,
+    budget_ref=None,
 ) -> dict:
     """Build a validated action dict for inclusion in a model response."""
     action = AssistantAction(
@@ -194,6 +289,9 @@ def build_action(
             datetime=datetime_str,
             account=account,
             confidence=round(confidence, 2),
+            period=period,
+            alert_threshold=alert_threshold,
+            budget_ref=budget_ref,
         ),
     )
     return action.model_dump(mode="json")
@@ -219,14 +317,15 @@ def _strip_code_fences(text: str) -> str:
     return text.strip()
 
 
-def parse_model_output(raw: str) -> Optional[ModelOutput]:
+def parse_model_output(raw: str, *, log_failure: bool = True) -> Optional[ModelOutput]:
     """Parse raw model text into a validated ModelOutput, or None on failure."""
     text = _strip_code_fences(raw.strip())
     try:
         data = json.loads(text)
         return ModelOutput(**data)
     except Exception as e:
-        logger.warning("Failed to parse model output: %s - raw: %.200s", e, raw)
+        if log_failure:
+            logger.warning("Failed to parse model output: %s - raw: %.200s", e, raw)
         return None
 
 

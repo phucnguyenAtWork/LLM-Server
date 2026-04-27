@@ -10,7 +10,7 @@ from peft import PeftModel
 from fina_schema import SYSTEM_PROMPT, parse_model_output, fallback_output
 
 BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"
-ADAPTER_NAME = "financial_qwen_native_v7"
+ADAPTER_NAME = "financial_qwen_native_v8"
 
 
 def chat():

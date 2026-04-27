@@ -6,6 +6,7 @@ Inference matches training: same SYSTEM_PROMPT, same context format.
 """
 
 import os
+import re
 import asyncio
 import torch
 import json
@@ -16,6 +17,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+import transformers.utils.import_utils as _tf_import_utils
+
+# Text-only model runtime. Some local environments have a mismatched torchvision
+# build, and transformers may import it indirectly through image utilities.
+_tf_import_utils.is_torchvision_available = lambda: False
+_tf_import_utils.is_torchvision_v2_available = lambda: False
+
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer, BitsAndBytesConfig
 from peft import PeftModel
 import uvicorn
@@ -24,9 +32,8 @@ from pathlib import Path
 
 from forecasting.predict import forecast_user
 from categorizer.predict import categorize
-from rag.retriever import retrieve_context
-from rag.store import index_user
 from nlp.pipeline import normalize_transaction
+from rag.retriever import retrieve_context_with_sources
 import mac_client
 from fina_schema import (
     SYSTEM_PROMPT, ModelOutput, parse_model_output, fallback_output,
@@ -36,11 +43,12 @@ load_dotenv()
 logger = logging.getLogger("fina.api")
 
 BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"
-ADAPTER_NAME = "financial_qwen_native_v7"
+ADAPTER_NAME = "financial_qwen_native_v8"
 
 MAC_API_URL = os.getenv("MAC_API_URL", "http://100.109.225.15:4001/api")
 FINA_HOST = os.getenv("FINA_HOST", "100.126.232.108")
 FINA_PORT = int(os.getenv("FINA_PORT", "8105"))
+RAG_TOP_K = int(os.getenv("RAG_TOP_K", "4"))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # APP SETUP
@@ -223,7 +231,6 @@ async def format_financial_context(user_id: str, role: str, period: str = "month
         mac_client.get_financial_goals(user_id),
         mac_client.get_account_balances(user_id),
         mac_client.get_budget_preferences(user_id),
-        mac_client.get_category_budgets(user_id),
         mac_client.get_monthly_history(user_id, months=3),
         return_exceptions=True,
     )
@@ -231,8 +238,7 @@ async def format_financial_context(user_id: str, role: str, period: str = "month
     goals = results[1] if not isinstance(results[1], Exception) else []
     balances = results[2] if not isinstance(results[2], Exception) else []
     budget_prefs = results[3] if not isinstance(results[3], Exception) else None
-    category_budgets = results[4] if not isinstance(results[4], Exception) else []
-    monthly_history = results[5] if not isinstance(results[5], Exception) else None
+    monthly_history = results[4] if not isinstance(results[4], Exception) else None
 
     if not data:
         return "Error: Could not fetch financial data."
@@ -241,6 +247,7 @@ async def format_financial_context(user_id: str, role: str, period: str = "month
     income = data["income"]
     spending_data = data["spending"]
     computed = data.get("computed", {})
+    budget_limits = computed.get("category_budget_status") or computed.get("budget_status") or []
 
     total_spent_val = computed.get("total_spent", sum(s["spent"] for s in spending_data))
     surplus_val = computed.get("surplus", income - total_spent_val)
@@ -298,13 +305,13 @@ async def format_financial_context(user_id: str, role: str, period: str = "month
     )
 
     # Category budgets
-    if category_budgets:
+    if budget_limits:
         spending_lookup = {s["category_name"]: s["spent"] for s in spending_data}
         cb_lines = []
         over_details, near_details = [], []
-        for cb in category_budgets:
+        for cb in budget_limits:
             cat_name = cb.get("categoryName", "Unknown")
-            limit = cb.get("monthlyLimit", 0)
+            limit = cb.get("monthlyLimit", cb.get("limit", 0))
             spent = spending_lookup.get(cat_name, 0)
             pct_used = (spent / limit * 100) if limit > 0 else 0
             if pct_used > 100:
@@ -420,6 +427,41 @@ async def format_financial_context(user_id: str, role: str, period: str = "month
     return ctx
 
 
+async def build_hybrid_context(user_id: str, role: str, message: str, period: str = "month"):
+    """Build structured financial context plus source-cited retrieved evidence."""
+    print(
+        f"[HYBRID] stage=context.start user_id={user_id} role={role} "
+        f"period={period} query={message!r}"
+    )
+    financial_context, rag_result = await asyncio.gather(
+        format_financial_context(user_id, role, period),
+        retrieve_context_with_sources(user_id, message, top_k=RAG_TOP_K),
+    )
+
+    if rag_result.context:
+        hybrid_context = financial_context + "\n\n" + rag_result.context
+        print(
+            f"[HYBRID] stage=context.attach user_id={user_id} "
+            f"structured_chars={len(financial_context)} rag_chars={len(rag_result.context)}"
+        )
+    else:
+        hybrid_context = financial_context
+        print(
+            f"[HYBRID] stage=context.no_rag user_id={user_id} "
+            f"structured_chars={len(financial_context)}"
+        )
+
+    print(
+        f"[HYBRID] stage=context.done user_id={user_id} "
+        f"rag_status={rag_result.status} sources={len(rag_result.sources)} "
+        f"total_chars={len(hybrid_context)}"
+    )
+    if rag_result.error:
+        print(f"[RAG] Error: {rag_result.error}")
+
+    return hybrid_context, rag_result
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # DASHBOARD (separate from main chat schema)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -438,38 +480,8 @@ async def generate_dashboard_json(user_id: str, role: str = "Student", period: s
     highest_cat = sorted_spending[0]["category_name"] if sorted_spending else "General"
     highest_amt = sorted_spending[0]["spent"] if sorted_spending else 0
 
-    # Try AI generation
-    prompt = f"""Analyze this data and return JSON only.
-Role: {role} | Income: {format_vnd(data['income'])} {cur} | Spent: {format_vnd(total_spent_val)} {cur} | Savings: {format_vnd(savings_val)} {cur}
-Top: {highest_cat} {format_vnd(highest_amt)} {cur}
-NUMBER FORMAT: Vietnamese style with dots (1.500.000 VND). Currency always VND.
-Return: {{"initial_message": "...", "summary_cards": [...], "smart_insights": [...]}}"""
-
-    messages = [
-        {"role": "system", "content": "You are FINA. Output valid JSON only. No markdown."},
-        {"role": "user", "content": prompt},
-    ]
-
-    try:
-        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer(text, return_tensors="pt").to("cuda")
-        input_length = inputs["input_ids"].shape[-1]
-        with torch.no_grad():
-            outputs = model.generate(**inputs, max_new_tokens=600, temperature=0.2,
-                                     do_sample=True, pad_token_id=tokenizer.eos_token_id)
-        raw = _decode_new_tokens(outputs, input_length, tokenizer)
-        result = _extract_json_object(raw)
-        if result and "smart_insights" in result:
-            result["prediction"] = {
-                "amount": _get_monthly_forecast(user_id, total_spent_val),
-                "confidence": 80 if _lstm_available(user_id) else 60,
-                "label": "Projected spending next month",
-            }
-            return result
-    except Exception as e:
-        print(f"[Dashboard AI failed - fallback]: {e}")
-
-    # Fallback
+    # Deterministic dashboard response.
+    # The AI-generated dashboard path proved too slow and unstable for the finance proxy.
     savings_ratio = (savings_val / data["income"] * 100) if data["income"] > 0 else 0
     budget_health = "success" if spend_ratio < 80 else "warning" if spend_ratio < 100 else "danger"
     savings_type = "success" if savings_ratio >= 20 else "warning"
@@ -562,10 +574,10 @@ async def detailed_status():
             "POST /categorize            — categorize transaction",
             "POST /categorize/batch      — batch categorize",
             "POST /nlp/normalize         — normalize text",
-            "POST /rag/index/{user_id}   — re-index RAG",
             "POST /train/lstm/{user_id}  — LSTM training",
         ],
         "mac_api": MAC_API_URL,
+        "rag": {"enabled": True, "top_k": RAG_TOP_K},
     }
 
 
@@ -589,30 +601,197 @@ async def get_history(user_id: str):
     return {"history": data["history"] if data else []}
 
 
+@app.get("/rag/context/{user_id}")
+async def get_rag_context(user_id: str, query: str = "financial overview"):
+    """Diagnostic endpoint for checking AWAD2 -> FINA RAG connectivity."""
+    role = await resolve_role(user_id, None)
+    context, rag_result = await build_hybrid_context(user_id, role, query)
+    return {
+        "user_id": user_id,
+        "role": role,
+        "rag": rag_result.as_dict(),
+        "context_preview": context[:4000],
+    }
+
+
+# ── Per-turn style steering ────────────────────────────────────────────
+# The LoRA was trained to be terse. For analysis / overview / advice-style
+# questions we prepend a hidden hint to the user turn so the model fills
+# the "message" field with a proper multi-point answer even on a single turn.
+_ANALYSIS_PATTERNS = re.compile(
+    r"\b(analyze|analysis|overview|summary|summarize|habit|habits|pattern|patterns|"
+    r"how (am|are) (i|we) doing|how is my|trend|trends|advice|recommend|"
+    r"what (can|should) (i|we) do|where (is|does) my money|"
+    r"review|breakdown|insight|insights|on track)\b",
+    re.IGNORECASE,
+)
+_BUDGET_PATTERNS = re.compile(
+    r"\b(budget|budgets|set (a )?limit|create (a )?budget|plan (my|a) spend|save for)\b",
+    re.IGNORECASE,
+)
+_CALC_AUDIT_PATTERNS = re.compile(
+    r"\b("
+    r"how good.*calculat|how accurate.*calculat|"
+    r"calculation.*accurate|calculations?.*good|"
+    r"how would i know|how do i know|can i trust|"
+    r"verify.*calculat|check.*calculat|audit.*calculat"
+    r")\b",
+    re.IGNORECASE,
+)
+_ASSISTANT_IDENTITY_PATTERNS = re.compile(
+    r"\b("
+    r"what(?:'s| is) your name|"
+    r"who are you|"
+    r"what should i call you|"
+    r"introduce yourself"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _context_value(context: str, label: str) -> str | None:
+    match = re.search(rf"^- {re.escape(label)}:\s*(.+)$", context, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def _build_calculation_audit_response(financial_context: str, rag_result) -> dict:
+    income_match = re.search(r"^TOTAL INCOME:\s*(.+)$", financial_context, re.MULTILINE)
+    income = income_match.group(1).strip() if income_match else "the income shown in AWAD2"
+    total_spent = _context_value(financial_context, "TOTAL SPENT") or "the summed expenses"
+    surplus = _context_value(financial_context, "SURPLUS") or "income minus total spent"
+    savings_rate = _context_value(financial_context, "SAVINGS RATE") or "surplus divided by income"
+    top_category = _context_value(financial_context, "TOP CATEGORY") or "the largest spending category"
+
+    citation_note = ""
+    if rag_result.sources:
+        first_ids = ", ".join(f"[{source.id}]" for source in rag_result.sources[:3])
+        citation_note = f" Retrieved evidence is attached as source IDs such as {first_ids}, so you can inspect which transactions were used."
+
+    message = (
+        "My calculations are strongest for deterministic totals because they come from AWAD2's structured finance data, not from free-form guessing. "
+        f"For this context, AWAD2 reports income as {income}, total spent as {total_spent}, surplus as {surplus}, savings rate as {savings_rate}, and top category as {top_category}. "
+        "You can verify them by checking the terminal logs: the API fetches transactions, builds pre-computed totals, then RAG lists selected sources as [S1], [S2], etc. "
+        "The formula is simple: total spent is the sum of expense transactions, surplus is income minus total spent, and savings rate is surplus divided by income. "
+        f"If any answer mentions a number that is not in FINANCIAL CONTEXT or the retrieved sources, treat it as untrusted.{citation_note}"
+    )
+
+    result = {
+        "kind": "analysis",
+        "message": message,
+        "action": None,
+        "signals": [],
+        "needs_clarification": False,
+    }
+    return {
+        "model_output": result,
+        "response": result["message"],
+        "actions": [],
+        "rag": rag_result.as_dict(),
+        "retrieved_sources": [
+            {"id": source.id, "text": source.text, "metadata": source.metadata}
+            for source in rag_result.sources
+        ],
+    }
+
+
+def _build_assistant_identity_response() -> dict:
+    result = {
+        "kind": "analysis",
+        "message": "My name is FINA. I am your personal finance assistant for tracking spending, checking budgets, calculating surplus, and explaining your financial context.",
+        "action": None,
+        "signals": [],
+        "needs_clarification": False,
+    }
+    return {
+        "model_output": result,
+        "response": result["message"],
+        "actions": [],
+        "rag": {"status": "skipped", "reason": "assistant_identity_question", "sources": []},
+        "retrieved_sources": [],
+    }
+
+def _apply_style_directive(message: str) -> str:
+    """Prefix the user turn with a hidden style hint when appropriate."""
+    if _CALC_AUDIT_PATTERNS.search(message):
+        hint = (
+            "[STYLE: The user is asking about calculation reliability, not asking for a spending diagnosis. "
+            "Explain that deterministic totals come from AWAD2 structured data and pre-computed FINANCIAL CONTEXT. "
+            "Show how to verify: total spent=sum expenses, surplus=income-total spent, savings rate=surplus/income, "
+            "and retrieved sources [S1], [S2] support transaction-level claims. Do not mention unrelated transactions "
+            "unless using them only as examples of evidence. Return ONLY one valid JSON object.]\n\n"
+        )
+        return hint + message
+    if _ANALYSIS_PATTERNS.search(message):
+        hint = (
+            "[STYLE: Give a full, conversational overview. Cite actual numbers from "
+            "FINANCIAL CONTEXT. Cover: headline (savings rate / surplus / top verdict), "
+            "top 1-2 spending categories with %, month-over-month change or any anomaly, "
+            "goal and budget status, one concrete suggestion for the user's role, and "
+            "end with a friendly follow-up question. Do not be terse. Return ONLY one "
+            "valid JSON object matching the schema; put all natural language inside "
+            "the `message` field.]\n\n"
+        )
+        return hint + message
+    if _BUDGET_PATTERNS.search(message):
+        hint = (
+            "[STYLE: Budget conversation. If the user is still asking or you are still "
+            "proposing a limit, return kind=\"analysis\" with a conversational message. "
+            "If the user has now confirmed the amount and category (including short "
+            "replies like 'yes', 'go ahead', 'food, 3.6m', or just an amount after you "
+            "proposed one), return kind=\"action\" with type=\"create_budget\", the "
+            "agreed amount as an integer in VND, and the category. For changes to an "
+            "existing budget use type=\"update_budget\"; for removal use "
+            "type=\"delete_budget\". Always return ONLY one valid JSON object.]\n\n"
+        )
+        return hint + message
+    return (
+        "[OUTPUT: Return ONLY one valid JSON object matching the schema. "
+        "Do not output prose outside JSON.]\n\n" + message
+    )
+
+
 @app.post("/chat")
 async def chat_endpoint(request: UserRequest):
     global model, tokenizer
     role = await resolve_role(request.user_id, request.role)
     print(f"\n[CHAT] User: {request.user_id} | Role: {role} | Q: {request.message}")
 
-    financial_context = await format_financial_context(request.user_id, role, request.period)
-    rag_context = retrieve_context(request.user_id, request.message)
+    if _ASSISTANT_IDENTITY_PATTERNS.search(request.message):
+        print("[CHAT] Deterministic route: assistant identity")
+        return _build_assistant_identity_response()
 
-    context_block = financial_context
-    if rag_context:
-        context_block += f"\n{rag_context}"
+    financial_context, rag_result = await build_hybrid_context(
+        request.user_id,
+        role,
+        request.message,
+        request.period,
+    )
+
+    if _CALC_AUDIT_PATTERNS.search(request.message):
+        print("[CHAT] Deterministic route: calculation audit")
+        return _build_calculation_audit_response(financial_context, rag_result)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": context_block},
+        {"role": "user", "content": financial_context},
         {"role": "assistant", "content": "Understood."},
     ]
 
     for turn in request.history:
-        if turn.role in ("user", "assistant"):
-            messages.append({"role": turn.role, "content": turn.content})
+        if turn.role == "user":
+            messages.append({"role": "user", "content": turn.content})
+        elif turn.role == "assistant":
+            parsed_turn = parse_model_output(turn.content, log_failure=False)
+            if parsed_turn is not None:
+                messages.append({
+                    "role": "assistant",
+                    "content": json.dumps(_model_output_to_dict(parsed_turn), ensure_ascii=False),
+                })
+            else:
+                logger.debug("Skipping non-JSON assistant history turn to preserve output format")
 
-    messages.append({"role": "user", "content": request.message})
+    steered_message = _apply_style_directive(request.message)
+    messages.append({"role": "user", "content": steered_message})
 
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(text, return_tensors="pt").to("cuda")
@@ -644,6 +823,11 @@ async def chat_endpoint(request: UserRequest):
         "model_output": result,
         "response": result["message"],
         "actions": [result["action"]] if result.get("action") else [],
+        "rag": rag_result.as_dict(),
+        "retrieved_sources": [
+            {"id": source.id, "text": source.text, "metadata": source.metadata}
+            for source in rag_result.sources
+        ],
     }
     return response
 
@@ -654,24 +838,53 @@ async def chat_stream_endpoint(request: UserRequest):
     role = await resolve_role(request.user_id, request.role)
     print(f"\n[STREAM] User: {request.user_id} | Role: {role} | Q: {request.message}")
 
-    financial_context = await format_financial_context(request.user_id, role, request.period)
-    rag_context = retrieve_context(request.user_id, request.message)
+    if _ASSISTANT_IDENTITY_PATTERNS.search(request.message):
+        print("[STREAM] Deterministic route: assistant identity")
+        response = _build_assistant_identity_response()
 
-    context_block = financial_context
-    if rag_context:
-        context_block += f"\n{rag_context}"
+        async def identity_generator():
+            yield f"data: {json.dumps({'final': response['model_output'], 'rag': response['rag']})}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(identity_generator(), media_type="text/event-stream")
+
+    financial_context, rag_result = await build_hybrid_context(
+        request.user_id,
+        role,
+        request.message,
+        request.period,
+    )
+
+    if _CALC_AUDIT_PATTERNS.search(request.message):
+        print("[STREAM] Deterministic route: calculation audit")
+        response = _build_calculation_audit_response(financial_context, rag_result)
+
+        async def audit_generator():
+            yield f"data: {json.dumps({'final': response['model_output'], 'rag': response['rag']})}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(audit_generator(), media_type="text/event-stream")
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": context_block},
+        {"role": "user", "content": financial_context},
         {"role": "assistant", "content": "Understood."},
     ]
 
     for turn in request.history:
-        if turn.role in ("user", "assistant"):
+        if turn.role == "user":
             messages.append({"role": turn.role, "content": turn.content})
+        elif turn.role == "assistant":
+            parsed_turn = parse_model_output(turn.content, log_failure=False)
+            if parsed_turn is not None:
+                messages.append({
+                    "role": "assistant",
+                    "content": json.dumps(_model_output_to_dict(parsed_turn), ensure_ascii=False),
+                })
+            else:
+                logger.debug("Skipping non-JSON assistant history turn to preserve output format")
 
-    messages.append({"role": "user", "content": request.message})
+    messages.append({"role": "user", "content": _apply_style_directive(request.message)})
 
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(text, return_tensors="pt").to("cuda")
@@ -703,7 +916,7 @@ async def chat_stream_endpoint(request: UserRequest):
             parsed = fallback_output(full_text)
 
         result = _model_output_to_dict(parsed)
-        yield f"data: {json.dumps({'final': result})}\n\n"
+        yield f"data: {json.dumps({'final': result, 'rag': rag_result.as_dict()})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(token_generator(), media_type="text/event-stream")
@@ -738,13 +951,6 @@ async def batch_categorize(request: BatchCategorizeRequest):
 async def normalize_text(request: NormalizeRequest):
     print(f"[NLP] '{request.description}'")
     return normalize_transaction(request.description)
-
-
-@app.post("/rag/index/{user_id}")
-async def rag_index(user_id: str):
-    print(f"[RAG] Indexing for User {user_id}")
-    count = index_user(user_id)
-    return {"indexed": count, "user_id": user_id}
 
 
 @app.post("/train/lstm/{user_id}")

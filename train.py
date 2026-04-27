@@ -17,17 +17,36 @@ from pathlib import Path
 
 import torch
 from datasets import load_dataset
-from peft import LoraConfig, prepare_model_for_kbit_training
+from peft import PeftModel, prepare_model_for_kbit_training
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"
-NEW_MODEL_NAME = "financial_qwen_native_v7"
+SOURCE_ADAPTER_NAME = "financial_qwen_native_v7"
+NEW_MODEL_NAME = "financial_qwen_native_v8"
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_FILE = PROJECT_ROOT / "hybrid_data.jsonl"
+SOURCE_ADAPTER_DIR = PROJECT_ROOT / SOURCE_ADAPTER_NAME
 CHECKPOINT_DIR = PROJECT_ROOT / f"{NEW_MODEL_NAME}_checkpoints"
 MODEL_OUTPUT_DIR = PROJECT_ROOT / NEW_MODEL_NAME
 MAX_SEQ_LENGTH = 2048
 EVAL_SPLIT = 0.05  # 5% held out for validation
+
+
+def find_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
+    """Return the most recently updated checkpoint directory, if any."""
+    if not checkpoint_dir.exists():
+        return None
+
+    latest_path = None
+    latest_mtime = -1.0
+    for path in checkpoint_dir.iterdir():
+        if not path.is_dir() or not path.name.startswith("checkpoint-"):
+            continue
+        mtime = path.stat().st_mtime
+        if mtime > latest_mtime:
+            latest_mtime = mtime
+            latest_path = path
+    return latest_path
 
 
 def ensure_utf8_mode():
@@ -37,6 +56,16 @@ def ensure_utf8_mode():
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
+
+
+def require_supported_python():
+    """This training stack is unstable on newer Python runtimes on Windows."""
+    version = sys.version_info
+    if version < (3, 11) or version >= (3, 13):
+        raise RuntimeError(
+            "Use Python 3.11 or 3.12 for training. "
+            f"Current runtime is {version.major}.{version.minor}.{version.micro}."
+        )
 
 
 def require_training_gpu() -> tuple[bool, torch.dtype]:
@@ -53,19 +82,26 @@ def require_training_gpu() -> tuple[bool, torch.dtype]:
 
 def train():
     ensure_utf8_mode()
+    require_supported_python()
     from trl import SFTTrainer, SFTConfig
 
     print(f"Initializing QLoRA training for {BASE_MODEL}...")
     print(f"Python: {sys.executable}")
+    print(f"Python version: {sys.version}")
     print(f"Dataset: {DATA_FILE}")
+    print(f"Source adapter: {SOURCE_ADAPTER_DIR}")
+    print(f"New model output: {MODEL_OUTPUT_DIR}")
+    print(f"Checkpoint dir: {CHECKPOINT_DIR}")
 
     if not DATA_FILE.exists():
         raise FileNotFoundError(f"Dataset file not found: {DATA_FILE}")
+    if not SOURCE_ADAPTER_DIR.exists():
+        raise FileNotFoundError(f"Source adapter directory not found: {SOURCE_ADAPTER_DIR}")
 
     use_bf16, compute_dtype = require_training_gpu()
     print(f"CUDA detected. bf16={use_bf16}, compute_dtype={compute_dtype}")
 
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(str(SOURCE_ADAPTER_DIR), trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.model_max_length = MAX_SEQ_LENGTH
     print(f"Tokenizer loaded. max_length={tokenizer.model_max_length}")
@@ -107,22 +143,14 @@ def train():
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
 
-    peft_config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM",
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ],
-    )
+    latest_checkpoint = find_latest_checkpoint(CHECKPOINT_DIR)
+    resume_from_checkpoint = str(latest_checkpoint) if latest_checkpoint is not None else None
+    adapter_source = str(latest_checkpoint) if latest_checkpoint is not None else str(SOURCE_ADAPTER_DIR)
+    if resume_from_checkpoint is None:
+        print(f"Initializing from source adapter: {SOURCE_ADAPTER_DIR}")
+    else:
+        print(f"Resuming v8 training from checkpoint: {resume_from_checkpoint}")
+    model = PeftModel.from_pretrained(model, adapter_source, is_trainable=True)
 
     sft_config = SFTConfig(
         output_dir=str(CHECKPOINT_DIR),
@@ -134,20 +162,22 @@ def train():
         bf16=use_bf16,
         fp16=not use_bf16,
         logging_steps=10,
-        save_strategy="epoch",
+        save_strategy="steps",
+        save_steps=100,
+        save_total_limit=6,
         eval_strategy="epoch",
         optim="adamw_torch",
         report_to="none",
         packing=False,
         max_length=MAX_SEQ_LENGTH,
         completion_only_loss=True,
+        dataloader_num_workers=0,
     )
 
     trainer_args = {
         "model": model,
         "train_dataset": train_dataset,
         "eval_dataset": eval_dataset,
-        "peft_config": peft_config,
         "args": sft_config,
     }
 
@@ -160,7 +190,7 @@ def train():
     trainer = SFTTrainer(**trainer_args)
 
     print("Starting training...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     print(f"Saving adapter to {MODEL_OUTPUT_DIR}...")
     trainer.model.save_pretrained(str(MODEL_OUTPUT_DIR))

@@ -115,14 +115,19 @@ async def get_transactions(user_id: str, limit: int = 200) -> list[dict]:
     Fetch user transactions from Mac backend.
     Falls back to direct DB if Mac is unreachable.
     """
+    print(f"[MacClient] transactions.source=awad2_http user_id={user_id} limit={limit}")
     try:
         r = await _client.get(f"/fina/users/{user_id}/transactions", params={"limit": limit})
         r.raise_for_status()
         data = r.json()
-        return data.get("transactions", data) if isinstance(data, dict) else data
+        rows = data.get("transactions", data) if isinstance(data, dict) else data
+        print(f"[MacClient] transactions.done source=awad2_http user_id={user_id} rows={len(rows)}")
+        return rows
     except Exception as e:
-        print(f"[MacClient] API unreachable ({e}), falling back to direct DB")
-        return _db_fetch_transactions(user_id, limit)
+        print(f"[MacClient] transactions.source=db_fallback user_id={user_id} reason={e}")
+        rows = _db_fetch_transactions(user_id, limit)
+        print(f"[MacClient] transactions.done source=db_fallback user_id={user_id} rows={len(rows)}")
+        return rows
 
 
 async def get_income_and_spending(user_id: str, period: str = "month") -> Optional[dict]:
@@ -222,6 +227,9 @@ async def get_budget_preferences(user_id: str) -> Optional[dict]:
     try:
         r = await _client.get(f"/fina/users/{user_id}/budget-preferences")
         r.raise_for_status()
+        # Endpoint returns empty body / null when the user has no prefs row — that's not an error.
+        if not r.content or r.text.strip() in ("", "null"):
+            return None
         data = r.json()
         if data and data.get("needs_pct") is not None:
             return data
@@ -229,21 +237,6 @@ async def get_budget_preferences(user_id: str) -> Optional[dict]:
     except Exception as e:
         print(f"[MacClient] API budget prefs failed ({e}), falling back to DB")
         return _db_fetch_budget_preferences(user_id)
-
-
-async def get_category_budgets(user_id: str) -> list[dict]:
-    """
-    Fetch user's per-category budget limits.
-    Returns: [{categoryName, monthlyLimit}] or [] if none set.
-    """
-    try:
-        r = await _client.get(f"/fina/users/{user_id}/category-budgets")
-        r.raise_for_status()
-        data = r.json()
-        return data.get("budgets", data) if isinstance(data, dict) else data
-    except Exception as e:
-        print(f"[MacClient] API category budgets failed ({e}), falling back to DB")
-        return _db_fetch_category_budgets(user_id)
 
 
 async def get_monthly_history(user_id: str, months: int = 3) -> dict:
@@ -463,25 +456,6 @@ def _db_fetch_budget_preferences(user_id: str) -> Optional[dict]:
     except Exception as e:
         print(f"[MacClient DB Fallback] budget prefs: {e}")
         return None
-
-
-def _db_fetch_category_budgets(user_id: str) -> list[dict]:
-    try:
-        conn = pymysql.connect(**DB_CONFIG)
-        with conn.cursor() as cursor:
-            cursor.execute("""
-                SELECT c.name AS categoryName, cb.monthly_limit AS monthlyLimit
-                FROM category_budgets cb
-                JOIN categories c ON cb.category_id = c.id
-                WHERE cb.user_id = %s
-                ORDER BY cb.monthly_limit DESC
-            """, (user_id,))
-            rows = cursor.fetchall()
-        conn.close()
-        return _convert_decimals(rows)
-    except Exception as e:
-        print(f"[MacClient DB Fallback] category budgets: {e}")
-        return []
 
 
 def _db_fetch_monthly_history(user_id: str, months: int = 3) -> dict:
