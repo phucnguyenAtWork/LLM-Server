@@ -11,6 +11,7 @@ import platform
 import re
 import sys
 import time
+import argparse
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
@@ -21,6 +22,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from benchmark_cases import TEST_CASES
 from fina_schema import SYSTEM_PROMPT, parse_model_output, fallback_output
+from rag import store as rag_store
+from rag.retriever import _transaction_text
 from thesis_evaluation import (
     score_citation_correctness,
     score_financial_accuracy,
@@ -30,14 +33,39 @@ from thesis_evaluation import (
     normalize_text,
 )
 
-BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"
-ADAPTER_NAME = "financial_qwen_native_v8"
+DEFAULT_BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"
+DEFAULT_ADAPTER_NAME = "financial_qwen_native_v8"
 PROJECT_ROOT = Path(__file__).resolve().parent
-ADAPTER_PATH = PROJECT_ROOT / ADAPTER_NAME
 LOGS_DIR = PROJECT_ROOT / "logs"
 
 SPLIT_RE = re.compile(r"\b(\d{2})\s*/\s*(\d{2})\s*/\s*(\d{2})\b")
 TAX_RE = re.compile(r"\btax|taxes|deduction|deductions\b", re.IGNORECASE)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run FINA thesis benchmark cases.")
+    parser.add_argument("--adapter", default=DEFAULT_ADAPTER_NAME, help="Adapter directory name or path.")
+    parser.add_argument(
+        "--base-model",
+        default=None,
+        help="Base model name/path. Defaults to adapter_config.json base_model_name_or_path.",
+    )
+    parser.add_argument("--phase", choices=["pre_rag", "post_rag"], default="pre_rag")
+    parser.add_argument(
+        "--cite-sources",
+        action="store_true",
+        help="Attach retrieved_sources and ask the model to cite them. Use with --phase post_rag.",
+    )
+    parser.add_argument(
+        "--rag-backend",
+        choices=["synthetic", "vector"],
+        default="synthetic",
+        help="synthetic = oracle sources built from case data; vector = real ChromaDB retrieval via rag.store.",
+    )
+    parser.add_argument("--limit", type=int, default=None, help="Run only the first N test cases.")
+    parser.add_argument("--case-id", action="append", default=None, help="Run one case ID. Repeatable.")
+    parser.add_argument("--label", default=None, help="Optional label saved in benchmark metadata.")
+    return parser.parse_args()
 
 
 def build_json_response(message: str) -> str:
@@ -146,6 +174,113 @@ def attach_model_evaluation_metrics(results, cases, phase="pre_rag"):
         "hallucination_rate_pct": pct_mean(row["hallucination_rate"] for row in metric_rows),
         "citation_correctness_pct": pct_mean(row["citation_correctness"] for row in metric_rows),
     }
+
+
+def source_texts_for_case(tc):
+    sources = []
+    idx = 1
+    for category, amount in tc["spending"].items():
+        sources.append(
+            {
+                "id": f"S{idx}",
+                "text": f"Spent {vnd(amount)} VND on {category}.",
+                "metadata": {"category": category, "amount": amount, "source": "benchmark_case"},
+            }
+        )
+        idx += 1
+
+    income = tc.get("income")
+    if income is not None:
+        sources.append(
+            {
+                "id": f"S{idx}",
+                "text": f"Monthly income is {vnd(income)} VND.",
+                "metadata": {"amount": income, "source": "benchmark_case"},
+            }
+        )
+        idx += 1
+
+    for goal in tc.get("goals") or []:
+        sources.append(
+            {
+                "id": f"S{idx}",
+                "text": (
+                    f"Goal {goal['name']}: saved {vnd(goal['current_saved'])} VND "
+                    f"toward {vnd(goal['target_amount'])} VND."
+                ),
+                "metadata": {"goal": goal["name"], "source": "benchmark_case"},
+            }
+        )
+        idx += 1
+
+    return sources[:3]
+
+
+def _synth_transactions_for_case(tc):
+    """Build per-transaction dicts from case data so Chroma can index/query them."""
+    txs = []
+    base_date = "2026-04-01"
+    for i, (category, amount) in enumerate(tc["spending"].items(), start=1):
+        txs.append({
+            "id": f"{tc['id']}_E{i}",
+            "type": "EXPENSE",
+            "category": category,
+            "description": category,
+            "amount": amount,
+            "currency": "VND",
+            "occurred_at": base_date,
+        })
+    income = tc.get("income")
+    if income is not None:
+        txs.append({
+            "id": f"{tc['id']}_I1",
+            "type": "INCOME",
+            "category": "Salary",
+            "description": "Monthly income",
+            "amount": income,
+            "currency": "VND",
+            "occurred_at": base_date,
+        })
+    for j, goal in enumerate(tc.get("goals") or [], start=1):
+        txs.append({
+            "id": f"{tc['id']}_G{j}",
+            "type": "EXPENSE",
+            "category": "Savings",
+            "description": f"Goal {goal['name']}: saved {goal['current_saved']} of {goal['target_amount']}",
+            "amount": goal["current_saved"],
+            "currency": "VND",
+            "occurred_at": base_date,
+        })
+    return txs
+
+
+def vector_sources_for_case(tc, top_k=3):
+    """Real ChromaDB retrieval: index this case's transactions, query by question."""
+    user_id = f"bench_{tc['id']}"
+    txs = _synth_transactions_for_case(tc)
+    rag_store.upsert_transactions(user_id, txs, _transaction_text)
+    raw = rag_store.query(user_id, tc["question"], top_k)
+    if not raw:
+        return []
+    docs = (raw.get("documents") or [[]])[0]
+    metas = (raw.get("metadatas") or [[]])[0]
+    distances = (raw.get("distances") or [[]])[0]
+    sources = []
+    for idx, (doc, meta, dist) in enumerate(zip(docs, metas, distances), start=1):
+        score = 1.0 - float(dist) if dist is not None else 0.0
+        md = dict(meta or {})
+        md["score"] = round(score, 4)
+        md["source"] = "vector_rag"
+        sources.append({"id": f"S{idx}", "text": doc, "metadata": md})
+    return sources
+
+
+def render_source_context(sources):
+    if not sources:
+        return ""
+    lines = ["\nRETRIEVED EVIDENCE:"]
+    lines.extend(f"- [{source['id']}] {source['text']}" for source in sources)
+    return "\n".join(lines) + "\n"
 
 
 def vnd(n):
@@ -304,16 +439,29 @@ def make_context(
     return ctx
 
 
-def run_inference(model, tokenizer, role, context, question, income, spending):
-    deterministic = deterministic_response(role, income, spending, question)
+def run_inference(model, tokenizer, role, context, question, income, spending, *, cite_sources=False):
+    deterministic = None if cite_sources else deterministic_response(role, income, spending, question)
     if deterministic is not None:
-        return deterministic, 0.0, 0
+        return deterministic, 0.0, 0, True
+
+    directive = (
+        "[OUTPUT: Return ONLY one valid JSON object matching the schema. Use kind=\"analysis\" "
+        "for calculations, tax advice, budget split planning, and recommendations. Do not emit "
+        "an action unless the user explicitly asks to log, edit, or delete a transaction.]"
+    )
+    if cite_sources:
+        directive = (
+            "[OUTPUT: Return ONLY one valid JSON object matching the schema. Use the retrieved "
+            "evidence when it supports a claim. Put source IDs like [S1] or [S2] inside the "
+            "`message` field for factual claims about income, spending, goals, or categories. "
+            "Do not cite a source ID that is not shown in RETRIEVED EVIDENCE.]"
+        )
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": context.replace("USER ROLE: Worker", f"USER ROLE: {role}", 1)},
         {"role": "assistant", "content": "Understood."},
-        {"role": "user", "content": "[OUTPUT: Return ONLY one valid JSON object matching the schema. Use kind=\"analysis\" for calculations, tax advice, budget split planning, and recommendations. Do not emit an action unless the user explicitly asks to log, edit, or delete a transaction.]\n\n" + question},
+        {"role": "user", "content": directive + "\n\n" + question},
     ]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(text, return_tensors="pt").to("cuda")
@@ -330,9 +478,10 @@ def run_inference(model, tokenizer, role, context, question, income, spending):
     latency = time.time() - t0
 
     raw = tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True).strip()
-    clean = raw if parse_model_output(raw) is not None else fallback_output(raw).model_dump_json()
+    parsed_ok = parse_model_output(raw) is not None
+    clean = raw if parsed_ok else fallback_output(raw).model_dump_json()
     tokens = outputs.shape[-1] - input_length
-    return clean, latency, tokens
+    return clean, latency, tokens, parsed_ok
 
 
 def ensure_utf8_mode():
@@ -344,25 +493,68 @@ def ensure_utf8_mode():
     os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
 
 
+def selected_cases(args):
+    cases = TEST_CASES
+    if args.case_id:
+        wanted = {case_id.upper() for case_id in args.case_id}
+        cases = [tc for tc in cases if tc["id"].upper() in wanted]
+    if args.limit is not None:
+        cases = cases[: args.limit]
+    return cases
+
+
+def resolve_adapter_path(adapter_name):
+    path = Path(adapter_name)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / adapter_name
+    return path
+
+
+def resolve_base_model(adapter_path, requested_base_model):
+    if requested_base_model:
+        return requested_base_model
+    config_path = adapter_path / "adapter_config.json"
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            base = config.get("base_model_name_or_path")
+            if base:
+                return base
+        except json.JSONDecodeError:
+            pass
+    return DEFAULT_BASE_MODEL
+
+
 def run_benchmark():
     ensure_utf8_mode()
+    args = parse_args()
+    adapter_path = resolve_adapter_path(args.adapter)
+    adapter_label = adapter_path.name
+    base_model_name = resolve_base_model(adapter_path, args.base_model)
+    cases = selected_cases(args)
+
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU not detected. Benchmark expects a local CUDA-capable model runtime.")
-    if not ADAPTER_PATH.exists():
-        raise FileNotFoundError(f"Adapter directory not found: {ADAPTER_PATH}")
+    if not adapter_path.exists():
+        raise FileNotFoundError(f"Adapter directory not found: {adapter_path}")
+    if not cases:
+        raise ValueError("No benchmark cases selected.")
 
     print("Loading FINA model...")
-    print(f"Adapter path: {ADAPTER_PATH}")
+    print(f"Base model: {base_model_name}")
+    print(f"Adapter path: {adapter_path}")
+    print(f"Phase: {args.phase} | cite_sources={args.cite_sources}")
+    print(f"Cases: {len(cases)}")
     print(f"Device: {torch.cuda.get_device_name(0)}")
-    tokenizer = AutoTokenizer.from_pretrained(str(ADAPTER_PATH), trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(str(adapter_path), trust_remote_code=True)
     torch_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     base_model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL,
+        base_model_name,
         torch_dtype=torch_dtype,
         device_map="cuda",
         trust_remote_code=True,
     )
-    model = PeftModel.from_pretrained(base_model, str(ADAPTER_PATH))
+    model = PeftModel.from_pretrained(base_model, str(adapter_path))
     model = model.merge_and_unload()
     model.eval()
     model.generation_config.do_sample = False
@@ -375,7 +567,7 @@ def run_benchmark():
     total_passed = 0
     results = []
 
-    for tc in TEST_CASES:
+    for tc in cases:
         ctx = make_context(
             tc["income"],
             tc["spending"],
@@ -386,35 +578,61 @@ def run_benchmark():
             monthly_history=tc.get("monthly_history"),
             recurring=tc.get("recurring"),
         )
-        resp, latency, tokens = run_inference(model, tokenizer, tc["role"], ctx, tc["question"], tc["income"], tc["spending"])
+        if args.cite_sources:
+            retrieved_sources = (
+                vector_sources_for_case(tc) if args.rag_backend == "vector"
+                else source_texts_for_case(tc)
+            )
+        else:
+            retrieved_sources = []
+        if retrieved_sources:
+            ctx += render_source_context(retrieved_sources)
+        resp, latency, tokens, json_compliant = run_inference(
+            model,
+            tokenizer,
+            tc["role"],
+            ctx,
+            tc["question"],
+            tc["income"],
+            tc["spending"],
+            cite_sources=args.cite_sources,
+        )
         passed = {name: chk["fn"](resp) for name, chk in tc["checks"].items()}
         n_pass = sum(passed.values())
         n_total = len(passed)
         total_checks += n_total
         total_passed += n_pass
-        results.append(
-            {
-                "id": tc["id"],
-                "name": tc["name"],
-                "role": tc["role"],
-                "score_pct": round(n_pass / n_total * 100, 2),
-                "latency_s": round(latency, 2),
-                "tokens": tokens,
-                "response": resp,
-                "checks": passed,
-            }
-        )
+        result = {
+            "id": tc["id"],
+            "name": tc["name"],
+            "role": tc["role"],
+            "score_pct": round(n_pass / n_total * 100, 2),
+            "latency_s": round(latency, 2),
+            "tokens": tokens,
+            "response": resp,
+            "json_compliant": json_compliant,
+            "checks": passed,
+        }
+        if retrieved_sources:
+            result["retrieved_sources"] = retrieved_sources
+        results.append(result)
         print(f"[{tc['id']}] {tc['name']} - {n_pass}/{n_total}")
 
     os.makedirs(LOGS_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    model_evaluation_metrics = attach_model_evaluation_metrics(results, TEST_CASES, phase="pre_rag")
+    model_evaluation_metrics = attach_model_evaluation_metrics(results, cases, phase=args.phase)
 
     payload = {
         "meta": {
             "timestamp": datetime.now().isoformat(),
-            "base_model": BASE_MODEL,
-            "adapter": ADAPTER_NAME,
+            "base_model": base_model_name,
+            "adapter": adapter_label,
+            "adapter_path": str(adapter_path),
+            "phase": args.phase,
+            "label": args.label,
+            "cite_sources": args.cite_sources,
+            "rag_backend": args.rag_backend if args.cite_sources else None,
+            "case_count": len(cases),
             "device": str(torch.cuda.get_device_name(0)) if torch.cuda.is_available() else "cpu",
             "cuda_version": torch.version.cuda or "N/A",
             "torch_version": torch.__version__,
@@ -424,11 +642,13 @@ def run_benchmark():
             "overall_accuracy_pct": round(total_passed / total_checks * 100, 2) if total_checks else 0,
             "total_checks_passed": total_passed,
             "total_checks": total_checks,
+            "json_compliance_pct": round(sum(1 for r in results if r["json_compliant"]) / len(results) * 100, 2) if results else 0,
             "model_evaluation_metrics": model_evaluation_metrics,
         },
         "per_test": results,
     }
-    path = LOGS_DIR / f"benchmark_{ts}.json"
+    phase_suffix = "post_rag" if args.phase == "post_rag" else "pre_rag"
+    path = LOGS_DIR / f"benchmark_{adapter_label}_{phase_suffix}_{ts}.json"
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     print(f"Saved benchmark log to {path}")

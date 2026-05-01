@@ -119,6 +119,12 @@ async def load_model():
     model = PeftModel.from_pretrained(base_model, ADAPTER_NAME)
     model.eval()
     _run_startup_benchmark(model, tokenizer)
+    try:
+        from rag import store as _rag_store
+        _rag_store._client_singleton()
+        print("[RAG] Chroma client warmed.")
+    except Exception as _e:
+        print(f"[RAG] Chroma warmup skipped: {_e}")
     print(f"FINA online at {FINA_HOST}:{FINA_PORT} | Mac: {MAC_API_URL}")
 
 
@@ -951,6 +957,15 @@ async def batch_categorize(request: BatchCategorizeRequest):
 async def normalize_text(request: NormalizeRequest):
     print(f"[NLP] '{request.description}'")
     return normalize_transaction(request.description)
+
+
+@app.get("/forecast/{user_id}")
+async def get_forecast(user_id: str):
+    try:
+        return forecast_user(user_id)
+    except Exception as e:
+        print(f"[Forecast endpoint] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/train/lstm/{user_id}")

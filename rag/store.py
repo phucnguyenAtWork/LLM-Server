@@ -104,6 +104,13 @@ def _build_metadata(tx: dict[str, Any]) -> dict[str, Any]:
         date_iso = date.strftime("%Y-%m-%d")
     else:
         date_iso = str(date)[:10]
+    date_epoch = 0
+    if date_iso:
+        try:
+            from datetime import datetime as _dt
+            date_epoch = int(_dt.strptime(date_iso, "%Y-%m-%d").timestamp())
+        except (ValueError, TypeError):
+            date_epoch = 0
     return {
         "transaction_id": _tx_id(tx),
         "type": str(tx.get("type", "")),
@@ -111,6 +118,7 @@ def _build_metadata(tx: dict[str, Any]) -> dict[str, Any]:
         "amount": amount_val,
         "currency": str(tx.get("currency", "VND")),
         "date_iso": date_iso,
+        "date_epoch": date_epoch,
     }
 
 
