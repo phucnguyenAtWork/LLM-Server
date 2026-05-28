@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Mac API (primary data source) ───────────────────────────────────────────
-MAC_API_URL = os.getenv("MAC_API_URL", "http://100.109.225.15:4001/api")
+MAC_API_URL = os.getenv("MAC_API_URL", "http://localhost:4001/api")
 
 # ── DB config (fallback when Mac API unreachable) ────────────────────────────
 DB_CONFIG = {

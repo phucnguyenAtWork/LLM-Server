@@ -1,20 +1,11 @@
 
 # Model adapters & checkpoints — large files, never commit
-financial_qwen_native_v1/
-financial_qwen_native_v1_checkpoints/
-financial_qwen_native_v2/
-financial_qwen_native_v2_checkpoints/
-financial_qwen_native_v3/
-financial_qwen_native_v3_checkpoints/
-financial_qwen_native_v4/
-financial_qwen_native_v4_checkpoints/
 financial_qwen_native_v5/
 financial_qwen_native_v5_checkpoints/
 financial_qwen_native_v6/
 financial_qwen_native_v6_checkpoints/
 financial_qwen_native_v7/
 financial_qwen_native_v7_checkpoints/
-financial_qwen_native_v8/
 financial_qwen_native_v8_checkpoints/
 models/
 
@@ -23,6 +14,8 @@ chroma_db/
 categorizer/saved/
 *.pkl
 *.pt
+*.safetensors
+!financial_qwen_native_v8/adapter_model.safetensors
 
 # Training data — large generated file
 hybrid_data.jsonl
@@ -52,7 +45,6 @@ build/
 # Models — local LLM model files are large, never commit
 *.gguf
 *.bin
-*.safetensors
 models/
 
 # Logs

@@ -1,0 +1,67 @@
+{
+  "seed": 42,
+  "ratios": {
+    "train": 0.8,
+    "val": 0.1,
+    "test": 0.1
+  },
+  "total": 6027,
+  "splits": {
+    "train": {
+      "n": 4822,
+      "pct": 80.01,
+      "roles": {
+        "Worker": 1562,
+        "Freelancer": 1725,
+        "Student": 1535
+      },
+      "families": {
+        "action_crud": 1505,
+        "role_specific": 580,
+        "context_analysis": 1122,
+        "hard_negative": 654,
+        "multi_turn": 497,
+        "clarification": 464
+      }
+    },
+    "val": {
+      "n": 603,
+      "pct": 10.0,
+      "roles": {
+        "Student": 184,
+        "Worker": 220,
+        "Freelancer": 199
+      },
+      "families": {
+        "action_crud": 192,
+        "multi_turn": 60,
+        "role_specific": 67,
+        "hard_negative": 87,
+        "clarification": 57,
+        "context_analysis": 140
+      }
+    },
+    "test": {
+      "n": 602,
+      "pct": 9.99,
+      "roles": {
+        "Student": 189,
+        "Freelancer": 213,
+        "Worker": 200
+      },
+      "families": {
+        "action_crud": 188,
+        "clarification": 49,
+        "context_analysis": 150,
+        "role_specific": 78,
+        "multi_turn": 62,
+        "hard_negative": 75
+      }
+    }
+  },
+  "overlap_check": {
+    "train_val": 0,
+    "train_test": 0,
+    "val_test": 0
+  }
+}

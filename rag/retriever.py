@@ -62,6 +62,7 @@ class RetrievalResult:
             "context": self.context,
             "status": self.status,
             "error": self.error,
+            "retrieved_ids": [s.id for s in self.sources],
             "retrieved_sources": [
                 {"id": s.id, "text": s.text, "metadata": s.metadata}
                 for s in self.sources
@@ -184,8 +185,44 @@ def _maybe_reindex(user_id: str, transactions: list[dict[str, Any]]) -> bool:
         return False
 
 
-def _vector_query(user_id: str, query: str, top_k: int) -> list[RetrievedSource] | None:
-    raw = store.query(user_id, query, top_k)
+def _period_epoch_range(period: Any) -> tuple[int, int] | None:
+    """Convert a PeriodSpec to an inclusive-start, exclusive-end epoch range.
+
+    Returns None when period is missing or has no usable date bounds (e.g.
+    period="all"), so callers can skip the filter and preserve legacy
+    behaviour.
+    """
+    if period is None:
+        return None
+    start = getattr(period, "start", None)
+    end = getattr(period, "end", None)
+    if start is None or end is None:
+        return None
+    try:
+        start_ts = int(datetime(start.year, start.month, start.day).timestamp())
+        end_ts = int(datetime(end.year, end.month, end.day).timestamp())
+    except (AttributeError, ValueError, TypeError):
+        return None
+    return start_ts, end_ts
+
+
+def _vector_query(
+    user_id: str,
+    query: str,
+    top_k: int,
+    period: Any = None,
+) -> list[RetrievedSource] | None:
+    where: dict[str, Any] | None = None
+    rng = _period_epoch_range(period)
+    if rng is not None:
+        start_ts, end_ts = rng
+        where = {
+            "$and": [
+                {"date_epoch": {"$gte": start_ts}},
+                {"date_epoch": {"$lt": end_ts}},
+            ]
+        }
+    raw = store.query(user_id, query, top_k, where=where)
     if not raw:
         return None
     docs = (raw.get("documents") or [[]])[0]
@@ -202,12 +239,43 @@ def _vector_query(user_id: str, query: str, top_k: int) -> list[RetrievedSource]
 
 # ── Public API ─────────────────────────────────────────────────────────────
 
+def _filter_by_period(
+    transactions: list[dict[str, Any]], period: Any
+) -> list[dict[str, Any]]:
+    """In-process date filter for the lexical fallback. Returns the input
+    unchanged when no usable period range is supplied."""
+    rng = _period_epoch_range(period)
+    if rng is None:
+        return transactions
+    start_ts, end_ts = rng
+    out: list[dict[str, Any]] = []
+    for tx in transactions:
+        raw_date = (
+            tx.get("date_iso")
+            or tx.get("occurred_at")
+            or tx.get("occurredAt")
+            or ""
+        )
+        if hasattr(raw_date, "strftime"):
+            iso = raw_date.strftime("%Y-%m-%d")
+        else:
+            iso = str(raw_date)[:10]
+        try:
+            ts = int(datetime.strptime(iso, "%Y-%m-%d").timestamp())
+        except (ValueError, TypeError):
+            continue
+        if start_ts <= ts < end_ts:
+            out.append(tx)
+    return out
+
+
 async def retrieve_context_with_sources(
     user_id: str,
     query: str,
     *,
     top_k: int = DEFAULT_TOP_K,
     transactions: list[dict[str, Any]] | None = None,
+    period: Any = None,
 ) -> RetrievalResult:
     """
     Retrieve source-cited transaction evidence for one user query.
@@ -232,7 +300,7 @@ async def retrieve_context_with_sources(
     transactions = transactions[:MAX_TRANSACTIONS]
 
     if store.CHROMA_AVAILABLE and _maybe_reindex(user_id, transactions):
-        sources = _vector_query(user_id, query, top_k)
+        sources = _vector_query(user_id, query, top_k, period=period)
         if sources is not None:
             if not sources:
                 return RetrievalResult(context="", sources=[], status="indexed_empty")
@@ -243,7 +311,10 @@ async def retrieve_context_with_sources(
                 status="ok_vector",
             )
 
-    sources = _lexical_fallback(transactions, query, top_k)
+    scoped = _filter_by_period(transactions, period) if period is not None else transactions
+    if not scoped:
+        scoped = transactions  # period filter wiped everything; fall back to unfiltered
+    sources = _lexical_fallback(scoped, query, top_k)
     print(f"{RAG_LOG_PREFIX} stage=select.done status=fallback_lexical selected={len(sources)}")
     return RetrievalResult(
         context=_build_context(sources),

@@ -58,9 +58,39 @@ def parse_args():
     )
     parser.add_argument(
         "--rag-backend",
-        choices=["synthetic", "vector"],
+        choices=["none", "synthetic", "vector"],
         default="synthetic",
-        help="synthetic = oracle sources built from case data; vector = real ChromaDB retrieval via rag.store.",
+        help=(
+            "none = skip retrieval entirely; synthetic = oracle sources built from "
+            "case data; vector = real ChromaDB retrieval via rag.store."
+        ),
+    )
+    parser.add_argument(
+        "--cases",
+        choices=["full", "diverse"],
+        default="full",
+        help="full = all 141 TEST_CASES; diverse = 18-case generalization slice.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["deterministic", "sampling"],
+        default="deterministic",
+        help=(
+            "deterministic = greedy decoding (deployment behavior, §5.5/4a); "
+            "sampling = temperature=0.3 with --seed for the sensitivity study (§5.5/4b)."
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Torch manual seed used in sampling mode. Saved into benchmark metadata.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.3,
+        help="Sampling temperature when --mode sampling.",
     )
     parser.add_argument("--limit", type=int, default=None, help="Run only the first N test cases.")
     parser.add_argument("--case-id", action="append", default=None, help="Run one case ID. Repeatable.")
@@ -439,7 +469,20 @@ def make_context(
     return ctx
 
 
-def run_inference(model, tokenizer, role, context, question, income, spending, *, cite_sources=False):
+def run_inference(
+    model,
+    tokenizer,
+    role,
+    context,
+    question,
+    income,
+    spending,
+    *,
+    cite_sources=False,
+    sampling=False,
+    temperature=0.3,
+    seed=0,
+):
     deterministic = None if cite_sources else deterministic_response(role, income, spending, question)
     if deterministic is not None:
         return deterministic, 0.0, 0, True
@@ -467,14 +510,21 @@ def run_inference(model, tokenizer, role, context, question, income, spending, *
     inputs = tokenizer(text, return_tensors="pt").to("cuda")
     input_length = inputs["input_ids"].shape[-1]
 
+    if sampling:
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    gen_kwargs = {
+        "max_new_tokens": 512,
+        "pad_token_id": tokenizer.eos_token_id,
+    }
+    if sampling:
+        gen_kwargs.update({"do_sample": True, "temperature": temperature, "top_p": 0.9})
+    else:
+        gen_kwargs.update({"do_sample": False})
+
     t0 = time.time()
     with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=512,
-            do_sample=False,
-            pad_token_id=tokenizer.eos_token_id,
-        )
+        outputs = model.generate(**inputs, **gen_kwargs)
     latency = time.time() - t0
 
     raw = tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True).strip()
@@ -494,7 +544,11 @@ def ensure_utf8_mode():
 
 
 def selected_cases(args):
-    cases = TEST_CASES
+    if args.cases == "diverse":
+        from benchmark_cases_diverse import DIVERSE_CASES
+        cases = list(DIVERSE_CASES)
+    else:
+        cases = TEST_CASES
     if args.case_id:
         wanted = {case_id.upper() for case_id in args.case_id}
         cases = [tc for tc in cases if tc["id"].upper() in wanted]
@@ -528,25 +582,33 @@ def resolve_base_model(adapter_path, requested_base_model):
 def run_benchmark():
     ensure_utf8_mode()
     args = parse_args()
-    adapter_path = resolve_adapter_path(args.adapter)
-    adapter_label = adapter_path.name
-    base_model_name = resolve_base_model(adapter_path, args.base_model)
+    use_baseline = str(args.adapter).lower() == "none"
+    adapter_path = None if use_baseline else resolve_adapter_path(args.adapter)
+    adapter_label = "baseline" if use_baseline else adapter_path.name
+    base_model_name = (
+        args.base_model or DEFAULT_BASE_MODEL
+        if use_baseline
+        else resolve_base_model(adapter_path, args.base_model)
+    )
     cases = selected_cases(args)
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU not detected. Benchmark expects a local CUDA-capable model runtime.")
-    if not adapter_path.exists():
+    if not use_baseline and not adapter_path.exists():
         raise FileNotFoundError(f"Adapter directory not found: {adapter_path}")
     if not cases:
         raise ValueError("No benchmark cases selected.")
 
+    sampling = args.mode == "sampling"
     print("Loading FINA model...")
     print(f"Base model: {base_model_name}")
-    print(f"Adapter path: {adapter_path}")
-    print(f"Phase: {args.phase} | cite_sources={args.cite_sources}")
-    print(f"Cases: {len(cases)}")
+    print(f"Adapter path: {'<none / baseline>' if use_baseline else adapter_path}")
+    print(f"Phase: {args.phase} | cite_sources={args.cite_sources} | rag_backend={args.rag_backend}")
+    print(f"Cases: {len(cases)} ({args.cases})")
+    print(f"Mode: {args.mode} | seed={args.seed} | temperature={args.temperature}")
     print(f"Device: {torch.cuda.get_device_name(0)}")
-    tokenizer = AutoTokenizer.from_pretrained(str(adapter_path), trust_remote_code=True)
+    tokenizer_source = base_model_name if use_baseline else str(adapter_path)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, trust_remote_code=True)
     torch_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     base_model = AutoModelForCausalLM.from_pretrained(
         base_model_name,
@@ -554,13 +616,22 @@ def run_benchmark():
         device_map="cuda",
         trust_remote_code=True,
     )
-    model = PeftModel.from_pretrained(base_model, str(adapter_path))
-    model = model.merge_and_unload()
+    if use_baseline:
+        model = base_model
+    else:
+        model = PeftModel.from_pretrained(base_model, str(adapter_path))
+        model = model.merge_and_unload()
     model.eval()
-    model.generation_config.do_sample = False
-    model.generation_config.temperature = None
-    model.generation_config.top_p = None
-    model.generation_config.top_k = None
+    if sampling:
+        model.generation_config.do_sample = True
+        model.generation_config.temperature = args.temperature
+        model.generation_config.top_p = 0.9
+        model.generation_config.top_k = None
+    else:
+        model.generation_config.do_sample = False
+        model.generation_config.temperature = None
+        model.generation_config.top_p = None
+        model.generation_config.top_k = None
     model.generation_config.pad_token_id = tokenizer.eos_token_id
 
     total_checks = 0
@@ -578,10 +649,14 @@ def run_benchmark():
             monthly_history=tc.get("monthly_history"),
             recurring=tc.get("recurring"),
         )
-        if args.cite_sources:
+        oracle_sources = source_texts_for_case(tc)
+        oracle_ids = [s["id"] for s in oracle_sources]
+        if args.rag_backend == "none":
+            retrieved_sources = []
+        elif args.cite_sources:
             retrieved_sources = (
                 vector_sources_for_case(tc) if args.rag_backend == "vector"
-                else source_texts_for_case(tc)
+                else oracle_sources
             )
         else:
             retrieved_sources = []
@@ -596,6 +671,9 @@ def run_benchmark():
             tc["income"],
             tc["spending"],
             cite_sources=args.cite_sources,
+            sampling=sampling,
+            temperature=args.temperature,
+            seed=args.seed,
         )
         passed = {name: chk["fn"](resp) for name, chk in tc["checks"].items()}
         n_pass = sum(passed.values())
@@ -615,6 +693,10 @@ def run_benchmark():
         }
         if retrieved_sources:
             result["retrieved_sources"] = retrieved_sources
+        if args.rag_backend == "vector":
+            # Oracle IDs come from the synthetic case data; carry them so
+            # thesis_evaluation can score Precision@k / Recall@k / MRR.
+            result["oracle_ids"] = oracle_ids
         results.append(result)
         print(f"[{tc['id']}] {tc['name']} - {n_pass}/{n_total}")
 
@@ -631,7 +713,11 @@ def run_benchmark():
             "phase": args.phase,
             "label": args.label,
             "cite_sources": args.cite_sources,
-            "rag_backend": args.rag_backend if args.cite_sources else None,
+            "rag_backend": args.rag_backend,
+            "cases_slice": args.cases,
+            "decoding_mode": args.mode,
+            "seed": args.seed if args.mode == "sampling" else None,
+            "temperature": args.temperature if args.mode == "sampling" else None,
             "case_count": len(cases),
             "device": str(torch.cuda.get_device_name(0)) if torch.cuda.is_available() else "cpu",
             "cuda_version": torch.version.cuda or "N/A",

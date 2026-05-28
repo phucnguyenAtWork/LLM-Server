@@ -160,13 +160,25 @@ def upsert_transactions(
     return len(docs)
 
 
-def query(user_id: str, text: str, top_k: int) -> dict[str, Any] | None:
-    """Vector query. Returns the raw Chroma response or None on failure."""
+def query(
+    user_id: str,
+    text: str,
+    top_k: int,
+    where: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Vector query. Returns the raw Chroma response or None on failure.
+
+    `where` is forwarded to Chroma as a metadata filter (e.g., a date_epoch
+    range). When None, no filter is applied (legacy behaviour).
+    """
     coll = get_collection(user_id)
     if coll is None:
         return None
     try:
-        return coll.query(query_texts=[text], n_results=top_k)
+        kwargs: dict[str, Any] = {"query_texts": [text], "n_results": top_k}
+        if where:
+            kwargs["where"] = where
+        return coll.query(**kwargs)
     except Exception as exc:
         print(f"{LOG_PREFIX} query.error user_id={user_id} error={exc}")
         return None

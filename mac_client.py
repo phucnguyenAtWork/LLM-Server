@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Mac Backend URL ──────────────────────────────────────────────────────────
-MAC_API_URL = os.getenv("MAC_API_URL", "http://100.109.225.15:4001/api")
+MAC_API_URL = os.getenv("MAC_API_URL", "http://localhost:4001/api")
 
 # ── Direct DB fallback (for offline / dev) ───────────────────────────────────
 DB_CONFIG = {
@@ -135,13 +135,19 @@ async def get_income_and_spending(user_id: str, period: str = "month") -> Option
     Fetch aggregated financial summary from Mac backend.
     Falls back to direct DB on failure.
 
-    period: "month" (current month), "year" (current year),
-            "all" (all time), or "YYYY-MM" (specific month)
+    period: "month" (current month), "year" (current year), "all" (all time),
+            "YYYY-MM" (specific month), or "Nm" (rolling N months, e.g. "3m")
 
     Returns: {currency, income, spending: [{category_name, spent}], history: [...], period}
     """
     try:
         r = await _client.get(f"/fina/users/{user_id}/summary", params={"period": period})
+        if r.status_code == 400 or r.status_code == 422:
+            print(
+                f"[MacClient] WARNING /summary rejected period={period!r} "
+                f"(HTTP {r.status_code}) — falling back to direct DB"
+            )
+            return _db_fetch_raw_data(user_id, period)
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -282,7 +288,7 @@ def _build_date_filter(period: str) -> tuple[str, list]:
     """
     Build a SQL WHERE clause fragment and params for date filtering.
 
-    period: "month" | "year" | "all" | "YYYY-MM"
+    period: "month" | "year" | "all" | "YYYY-MM" | "Nm" (rolling N months)
     Returns: (sql_fragment, params) e.g. ("AND t.occurred_at >= %s", ["2026-04-01"])
     """
     if period == "all":
@@ -291,6 +297,19 @@ def _build_date_filter(period: str) -> tuple[str, list]:
         return "AND t.occurred_at >= DATE_FORMAT(NOW(), '%%Y-01-01')", []
     if period == "month":
         return "AND t.occurred_at >= DATE_FORMAT(NOW(), '%%Y-%%m-01')", []
+    if period == "prev_month":
+        return (
+            "AND t.occurred_at >= DATE_FORMAT(NOW() - INTERVAL 1 MONTH, '%%Y-%%m-01') "
+            "AND t.occurred_at <  DATE_FORMAT(NOW(), '%%Y-%%m-01')",
+            [],
+        )
+    # Rolling N months: "1m", "3m", "6m", "12m", ...
+    import re as _re
+    m = _re.match(r"^(\d{1,2})m$", period or "", _re.IGNORECASE)
+    if m:
+        n = int(m.group(1))
+        if 1 <= n <= 24:
+            return f"AND t.occurred_at >= DATE_SUB(NOW(), INTERVAL {n} MONTH)", []
     # Specific month: "YYYY-MM"
     try:
         year, month = period.split("-")

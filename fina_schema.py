@@ -8,7 +8,7 @@ import logging
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger("fina")
 
@@ -63,6 +63,66 @@ VALID_SIGNALS = {
     "on_track",
 }
 
+# Common LLM variants → canonical signal. Applied before whitelist validation so
+# a hallucinated synonym ("overlimit") doesn't kick the whole response into the
+# fallback path. Keep keys lowercase/underscored — _normalize_signals normalizes
+# input first, then looks up here.
+SIGNAL_ALIASES: dict[str, str] = {
+    "overlimit": "over_budget",
+    "over_limit": "over_budget",
+    "exceeded": "over_budget",
+    "budget_exceeded": "over_budget",
+    "category_exceeded": "category_budget_exceeded",
+    "category_over_budget": "category_budget_exceeded",
+    "under_budget": "within_budget",
+    "underbudget": "within_budget",
+    "at_risk": "goal_at_risk",
+    "goal_risk": "goal_at_risk",
+    "savings_low": "below_savings_target",
+    "savings_high": "above_savings_target",
+    "spending_up": "spending_up_mom",
+    "spending_down": "spending_down_mom",
+    "anomaly": "anomaly_detected",
+    "no_budgets": "no_category_budgets",
+    "fixed_costs_high": "high_fixed_costs",
+}
+
+
+def _normalize_signals(raw) -> list[str]:
+    """Pre-validation cleanup of model-emitted signals.
+
+    Lowercases/underscores each entry, applies SIGNAL_ALIASES, drops anything
+    still outside VALID_SIGNALS, and de-dupes while preserving order. Every
+    transformation (alias hit or unknown drop) is logged at WARNING so the
+    event is visible per user query without changing the schema contract.
+    """
+    if not raw:
+        return []
+    if not isinstance(raw, (list, tuple)):
+        logger.warning("[signal-normalize] dropping non-list signals payload: %r", raw)
+        return []
+
+    cleaned: list[str] = []
+    for sig in raw:
+        original = sig
+        norm = str(sig).strip().lower().replace("-", "_").replace(" ", "_")
+        mapped = SIGNAL_ALIASES.get(norm, norm)
+        if mapped in VALID_SIGNALS:
+            if mapped != original:
+                logger.warning("[signal-normalize] aliased %r -> %r", original, mapped)
+            cleaned.append(mapped)
+        else:
+            logger.warning("[signal-normalize] dropped unknown signal %r", original)
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for s in cleaned:
+        if s not in seen:
+            seen.add(s)
+            deduped.append(s)
+    return deduped
+
+
 SYSTEM_PROMPT = """\
 You are FINA, a warm and knowledgeable personal financial advisor. Talk with the user
 like a helpful friend who happens to know their finances — not like an answering machine.
@@ -93,6 +153,12 @@ Schema:
   "signals": [],
   "needs_clarification": false
 }
+
+The "signals" array MUST contain only values from this exact list (no inventions,
+no synonyms, no plurals): "anomaly_detected", "over_budget", "within_budget",
+"goal_at_risk", "below_savings_target", "above_savings_target",
+"category_budget_exceeded", "spending_up_mom", "spending_down_mom",
+"high_fixed_costs", "no_category_budgets", "deficit", "on_track".
 
 Intent routing:
 - Use "action" when the user clearly wants to log/edit/delete a transaction OR
@@ -132,8 +198,37 @@ Context rules (anti-hallucination):
   budget, do NOT say the X transaction is "within the Y budget". State clearly that X has
   no budget set, and optionally suggest creating one for X.
 - Only claim a category has a budget when CATEGORY BUDGET STATUS explicitly lists it.
+- For GENERAL budget questions ("will I overshoot my budget?", "am I on track?", "how am
+  I doing this month?"), you MUST address EVERY category listed in CATEGORY BUDGET STATUS
+  — do not cherry-pick one. For each one, copy verbatim the spent / limit / % used and the
+  pre-computed "projected month-end" number from the same line. NEVER invent budget limits
+  or projection numbers — every number you state must come directly from CATEGORY BUDGET
+  STATUS. When the user asks "by how much" or "by month-end", quote the projected overage
+  or buffer per category, then quote PROJECTED TOTAL OVERAGE BY MONTH-END as the headline.
+  Never answer a multi-budget question by addressing only one category.
+- For category-SPECIFIC questions ("how's my Food budget?"), only discuss budgets that
+  appear in CATEGORY BUDGET STATUS. If the user names a category that is not listed,
+  state plainly that no budget is set for that category and offer to create one.
+- HARD RULE: If a category does not appear in CATEGORY BUDGET STATUS, you MUST NOT
+  state any budget number (limit, "your X budget is N VND", etc.) for it. Never invent
+  a limit. Say "no budget set for X" and offer to create one. This rule overrides any
+  pattern from training where you may have answered with a fabricated limit.
+- TIME-WINDOW RULE: When you reference a time window in the message, use the exact
+  PERIOD label given at the top of FINANCIAL CONTEXT (e.g. "April 2026 (last month)",
+  "last 3 months", "May 2026 (current month)"). Do NOT say "this month" if the data
+  is from a different period. If the period is "April 2026 (last month)", say "in
+  April" or "last month". If the period is rolling like "last 3 months", say "over
+  the last 3 months". Never paraphrase the period in a way that contradicts the
+  PERIOD label.
 - If CATEGORY BUDGET STATUS says "OVER LIMIT by X", call X an overage or overspend,
   never "savings". Savings means unspent surplus, not an amount above budget.
+- PERIOD-SCOPE RULE: Only reason about evidence whose date falls inside the PERIOD
+  window declared at the top of FINANCIAL CONTEXT. If a retrieved RAG row is dated
+  outside that window, ignore it for "this period" claims even if its amount is larger.
+- NO-RECOMPUTE RULE: When FINANCIAL CONTEXT already states a total, surplus, percentage,
+  or projection, quote that exact number. Do not re-derive it from line items.
+- EVIDENCE-CONFLICT RULE: If FINANCIAL CONTEXT and the retrieved RAG block disagree on
+  a number or category, trust FINANCIAL CONTEXT and briefly note the discrepancy.
 
 Style — the whole point is HERE:
 - Be conversational, specific, and genuinely helpful. The "message" field is your whole
@@ -175,6 +270,24 @@ USER ROLE rules:
 - Student: focus on affordability, debt avoidance, semester planning, and part-time income.
 - Worker: focus on salary splitting, emergency funds, BHXH/retirement, and investing basics.
 - Freelancer: focus on tax reserve, income buffer, quarterly planning, and business/personal separation.
+
+Advice & general questions:
+- Some questions are conceptual or advisory and are NOT answered by FINANCIAL CONTEXT
+  (e.g. "rent vs buy", "what is compound interest", "how do I stop impulse buying",
+  "do I need insurance", career and habit questions). For these, give sound,
+  conventional financial guidance in a warm, hedged tone ("generally...", "a common
+  rule is..."). Answer the question on its own terms — do not deflect into a spending
+  summary the user did not ask for.
+- Reference the user's own numbers only when they are directly relevant to the advice.
+  NEVER invent a personal amount, balance, budget, or target that is not in FINANCIAL
+  CONTEXT. Generic reference figures are fine (e.g. "3–6 months of expenses",
+  "the 50/30/20 rule"), because they are general guidance, not claims about the user.
+- If a piece of advice would need a personal number you do not have, say so and ask
+  for it rather than guessing ("I don't have your rent on file — what are you paying?").
+- Out of scope: do NOT predict markets or asset prices (stocks, crypto, gold) and do
+  NOT give buy/sell tips, and do NOT offer to move money on the user's behalf
+  (transfers, payments, lending). Politely decline and redirect to budgeting,
+  tracking, saving, and planning, which is what you can actually help with.
 """
 
 
@@ -241,6 +354,11 @@ class ModelOutput(BaseModel):
     action: Optional[AssistantAction] = None
     signals: list[str] = Field(default_factory=list)
     needs_clarification: bool = False
+
+    @field_validator("signals", mode="before")
+    @classmethod
+    def _normalize_signals_before_validation(cls, v):
+        return _normalize_signals(v)
 
     @model_validator(mode="after")
     def validate_output(self):
@@ -329,6 +447,42 @@ def parse_model_output(raw: str, *, log_failure: bool = True) -> Optional[ModelO
         return None
 
 
+def parse_model_output_with_status(
+    raw: str, *, log_failure: bool = True
+) -> tuple[Optional[ModelOutput], dict]:
+    """Parse and return (output_or_None, status_dict).
+
+    Status dict shape:
+      {"ok": bool, "error": str | None, "error_type": str | None, "raw_excerpt": str}
+
+    Used by api.py to surface schema validation errors to the caller (and into
+    evaluation logs) without silently swallowing them via fallback_output.
+    """
+    text = _strip_code_fences(raw.strip())
+    try:
+        data = json.loads(text)
+        output = ModelOutput(**data)
+        return output, {"ok": True, "error": None, "error_type": None, "raw_excerpt": text[:200]}
+    except json.JSONDecodeError as e:
+        if log_failure:
+            logger.warning("Model output is not valid JSON: %s - raw: %.200s", e, raw)
+        return None, {
+            "ok": False,
+            "error": f"invalid_json: {e}",
+            "error_type": "json_decode",
+            "raw_excerpt": text[:200],
+        }
+    except Exception as e:
+        if log_failure:
+            logger.warning("Model output failed schema validation: %s - raw: %.200s", e, raw)
+        return None, {
+            "ok": False,
+            "error": str(e),
+            "error_type": "schema_validation",
+            "raw_excerpt": text[:200],
+        }
+
+
 def fallback_output(raw: str) -> ModelOutput:
     """Return a safe fallback ModelOutput when parsing fails."""
     return ModelOutput(
@@ -338,3 +492,55 @@ def fallback_output(raw: str) -> ModelOutput:
         signals=[],
         needs_clarification=False,
     )
+
+
+# ── Action-safety guard (§6 of the thesis plan) ──────────────────────────────
+
+# Hard upper bound on a single transaction/budget amount in VND. The dataset
+# tops out around 10^8 VND/month; anything beyond 10^10 is almost certainly a
+# unit error, hallucination, or model corruption.
+ACTION_AMOUNT_HARD_CAP_VND = 10_000_000_000
+
+
+def validate_action_safety(
+    action: Optional["AssistantAction"],
+    *,
+    known_categories: Optional[set[str]] = None,
+    require_confirmation_for_delete: bool = True,
+) -> tuple[bool, Optional[str]]:
+    """Pre-execution safety check for actions emitted by the model.
+
+    Returns (ok, reason). Callers should drop the action when ok is False and
+    surface the reason to the user / evaluation log. Independent of the Pydantic
+    schema validators (those enforce shape, this enforces operational safety).
+    """
+    if action is None:
+        return True, None
+
+    args = action.arguments
+    action_type = action.type
+
+    if args.amount is not None:
+        if args.amount < 0:
+            return False, f"negative amount rejected: {args.amount}"
+        if args.amount > ACTION_AMOUNT_HARD_CAP_VND:
+            return False, f"amount exceeds safety cap: {args.amount} > {ACTION_AMOUNT_HARD_CAP_VND}"
+
+    if args.category is not None and args.category not in VALID_CATEGORIES:
+        return False, f"unknown category: {args.category}"
+
+    if known_categories is not None and args.category is not None and args.category not in known_categories:
+        return False, f"category not in user context: {args.category}"
+
+    if args.alert_threshold is not None and not 0.0 <= args.alert_threshold <= 1.0:
+        return False, f"alert_threshold out of range: {args.alert_threshold}"
+
+    if args.period is not None and args.period not in VALID_BUDGET_PERIODS:
+        return False, f"invalid period: {args.period}"
+
+    if action_type in (ActionType.DELETE_TRANSACTION, ActionType.DELETE_BUDGET):
+        if require_confirmation_for_delete:
+            if args.transaction_ref is None and args.budget_ref is None and args.item is None:
+                return False, "delete actions require an explicit reference (transaction_ref, budget_ref, or item)"
+
+    return True, None

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 
@@ -36,11 +37,56 @@ def load_log(path: Path) -> dict:
         "base_model": meta.get("base_model"),
         "adapter": meta.get("adapter"),
         "phase": meta.get("phase", "unknown"),
+        "rag_backend": meta.get("rag_backend"),
+        "cases_slice": meta.get("cases_slice"),
+        "decoding_mode": meta.get("decoding_mode"),
+        "seed": meta.get("seed"),
         "case_count": meta.get("case_count") or len(payload.get("per_test", [])),
         "overall_accuracy_pct": aggregate.get("overall_accuracy_pct"),
+        "json_compliance_pct": aggregate.get("json_compliance_pct"),
     }
     row.update(model_metrics)
+
+    # Pull thesis_eval companion metrics if available. Prefer the exact
+    # sibling name, then fall back to matching the evaluator's recorded input.
+    sibling = find_thesis_eval(path)
+    if sibling.exists():
+        try:
+            thesis = json.loads(sibling.read_text(encoding="utf-8"))
+            rc = thesis.get("role_classification") or {}
+            row["role_macro_f1"] = rc.get("macro_f1")
+            row["role_accuracy"] = rc.get("accuracy")
+            pr = (thesis.get("pass_rates") or {}).get("overall") or {}
+            for metric, info in pr.items():
+                row[f"pass_rate_{metric}_pct"] = info.get("pass_rate_pct") if isinstance(info, dict) else None
+            rq = thesis.get("retrieval_quality") or {}
+            for key in ("precision_at_k", "recall_at_k", "mrr"):
+                row[f"retrieval_{key}"] = rq.get(key)
+        except Exception:
+            pass
+
     return row
+
+
+def find_thesis_eval(path: Path) -> Path:
+    exact = path.parent / f"thesis_eval_{path.stem}.json"
+    if exact.exists():
+        return exact
+
+    for candidate in path.parent.glob("thesis_eval_*.json"):
+        try:
+            meta = json.loads(candidate.read_text(encoding="utf-8")).get("meta", {})
+        except Exception:
+            continue
+        recorded = meta.get("input")
+        if recorded and _normalized_benchmark_name(Path(recorded).name) == _normalized_benchmark_name(path.name):
+            return candidate
+
+    return exact
+
+
+def _normalized_benchmark_name(name: str) -> str:
+    return re.sub(r"_(oracle|vector)_?(?=\d{4}-\d{2}-\d{2}_)", "_", name)
 
 
 def fmt(value) -> str:
@@ -72,15 +118,30 @@ def write_csv(rows: list[dict], path: Path) -> None:
     headers = [
         "label",
         "phase",
+        "rag_backend",
+        "cases_slice",
+        "decoding_mode",
+        "seed",
         "case_count",
         "base_model",
         "adapter",
         "overall_accuracy_pct",
+        "json_compliance_pct",
         "financial_accuracy_pct",
         "role_appropriateness_pct",
         "personalization_quality_pct",
         "hallucination_rate_pct",
         "citation_correctness_pct",
+        "role_accuracy",
+        "role_macro_f1",
+        "pass_rate_financial_accuracy_pct",
+        "pass_rate_role_appropriateness_pct",
+        "pass_rate_personalization_quality_pct",
+        "pass_rate_hallucination_rate_pct",
+        "pass_rate_json_schema_pct",
+        "retrieval_precision_at_k",
+        "retrieval_recall_at_k",
+        "retrieval_mrr",
         "path",
     ]
     lines = [",".join(headers)]

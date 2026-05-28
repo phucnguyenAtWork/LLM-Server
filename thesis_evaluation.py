@@ -27,6 +27,7 @@ Existing `benchmark.py` logs are supported. Future RAG benchmark logs may add
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 from collections import defaultdict
@@ -40,6 +41,18 @@ from fina_schema import parse_model_output
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 LOGS_DIR = PROJECT_ROOT / "logs"
+
+# Threshold pass-rate definitions (§5.1 of the thesis).
+# Expected labels in this benchmark are always PASS, so this is a pass-rate
+# and failure-mode breakdown — NOT a balanced classification confusion matrix.
+PASS_THRESHOLDS = {
+    "financial_accuracy": ("ge", 0.8),
+    "role_appropriateness": ("ge", 0.7),
+    "personalization_quality": ("ge", 0.6),
+    "hallucination_rate": ("le", 0.1),
+}
+
+ROLES = ("Student", "Worker", "Freelancer")
 
 ROLE_TERMS = {
     "Student": {
@@ -327,6 +340,265 @@ def aggregate_metric(rows: list[dict[str, Any]], key: str) -> float | None:
     return round(mean(values) * 100, 2)
 
 
+# ── §1a. Threshold pass-rates / failure-mode breakdown ─────────────────────
+
+def _passes(metric: str, value: float | None) -> bool | None:
+    if value is None:
+        return None
+    op, threshold = PASS_THRESHOLDS[metric]
+    return value >= threshold if op == "ge" else value <= threshold
+
+
+def _first_failure(row: dict[str, Any]) -> str | None:
+    """Return the first metric that tripped its threshold, or 'schema_invalid', or None."""
+    if row.get("json_ok") is False:
+        return "schema_invalid"
+    for metric in PASS_THRESHOLDS:
+        verdict = _passes(metric, row.get(metric))
+        if verdict is False:
+            return metric
+    return None
+
+
+def _failure_explanation(metric: str | None, row: dict[str, Any]) -> str:
+    if metric is None:
+        return "all thresholds met"
+    if metric == "schema_invalid":
+        return "model output failed JSON schema parse"
+    value = row.get(metric)
+    op, threshold = PASS_THRESHOLDS[metric]
+    direction = ">=" if op == "ge" else "<="
+    return f"{metric}={value} (need {direction} {threshold})"
+
+
+def compute_pass_rates(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    overall: dict[str, Any] = {}
+    failure_modes: dict[str, int] = defaultdict(int)
+    for metric in PASS_THRESHOLDS:
+        verdicts = [_passes(metric, row.get(metric)) for row in rows]
+        scored = [v for v in verdicts if v is not None]
+        overall[metric] = {
+            "n": len(scored),
+            "pass": sum(1 for v in scored if v),
+            "pass_rate_pct": round(sum(1 for v in scored if v) / len(scored) * 100, 2) if scored else None,
+            "threshold": PASS_THRESHOLDS[metric],
+        }
+
+    json_rows = [row for row in rows if row.get("json_ok") is not None]
+    overall["json_schema"] = {
+        "n": len(json_rows),
+        "pass": sum(1 for row in json_rows if row.get("json_ok")),
+        "pass_rate_pct": round(
+            sum(1 for row in json_rows if row.get("json_ok")) / len(json_rows) * 100, 2
+        ) if json_rows else None,
+    }
+
+    for row in rows:
+        mode = _first_failure(row)
+        if mode is not None:
+            failure_modes[mode] += 1
+
+    by_role: dict[str, dict[str, Any]] = {}
+    for role in ROLES:
+        role_rows = [r for r in rows if r.get("role") == role]
+        if not role_rows:
+            continue
+        by_role[role] = {
+            "count": len(role_rows),
+            "all_pass": sum(1 for r in role_rows if _first_failure(r) is None),
+            "all_pass_pct": round(
+                sum(1 for r in role_rows if _first_failure(r) is None) / len(role_rows) * 100, 2
+            ),
+        }
+        for metric in PASS_THRESHOLDS:
+            verdicts = [_passes(metric, r.get(metric)) for r in role_rows]
+            scored = [v for v in verdicts if v is not None]
+            by_role[role][f"{metric}_pass_pct"] = (
+                round(sum(1 for v in scored if v) / len(scored) * 100, 2) if scored else None
+            )
+
+    return {
+        "overall": overall,
+        "failure_modes": dict(failure_modes),
+        "by_role": by_role,
+    }
+
+
+# ── §1b. True 3×3 role classification (the only legitimate F1 in this thesis) ─
+
+def infer_target_role(message: str) -> str | None:
+    """Score the response against each role's vocabulary; return argmax role."""
+    text = message.lower()
+    if not text.strip():
+        return None
+    scores: dict[str, float] = {}
+    for role in ROLES:
+        cfg = ROLE_TERMS[role]
+        positives = sum(1 for term in cfg["positive"] if term in text)
+        negatives = sum(1 for term in cfg["negative"] if term in text)
+        bonus = 1.0 if role.lower() in text else 0.0
+        scores[role] = positives + bonus - 0.5 * negatives
+    best = max(scores.values())
+    if best <= 0:
+        return None
+    winners = [role for role, score in scores.items() if score == best]
+    return winners[0] if len(winners) == 1 else None
+
+
+def compute_role_classification(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    cm: dict[str, dict[str, int]] = {true: {pred: 0 for pred in (*ROLES, "unknown")} for true in ROLES}
+    for row in rows:
+        true_role = row.get("role")
+        if true_role not in ROLES:
+            continue
+        pred = row.get("predicted_role") or "unknown"
+        cm[true_role][pred] = cm[true_role].get(pred, 0) + 1
+
+    per_role: dict[str, dict[str, float | None]] = {}
+    f1_values: list[float] = []
+    for role in ROLES:
+        tp = cm[role][role]
+        fp = sum(cm[other][role] for other in ROLES if other != role)
+        fn = sum(cm[role][pred] for pred in cm[role] if pred != role)
+        precision = tp / (tp + fp) if (tp + fp) else None
+        recall = tp / (tp + fn) if (tp + fn) else None
+        if precision and recall:
+            f1 = 2 * precision * recall / (precision + recall)
+        else:
+            f1 = 0.0 if (tp + fp + fn) else None
+        per_role[role] = {
+            "precision": round(precision, 4) if precision is not None else None,
+            "recall": round(recall, 4) if recall is not None else None,
+            "f1": round(f1, 4) if f1 is not None else None,
+            "support": tp + fn,
+        }
+        if f1 is not None:
+            f1_values.append(f1)
+
+    total = sum(cm[true][pred] for true in ROLES for pred in cm[true])
+    correct = sum(cm[role][role] for role in ROLES)
+    accuracy = round(correct / total, 4) if total else None
+    macro_f1 = round(mean(f1_values), 4) if f1_values else None
+
+    return {
+        "confusion_matrix": cm,
+        "per_role": per_role,
+        "accuracy": accuracy,
+        "macro_f1": macro_f1,
+        "support": total,
+    }
+
+
+# ── §7. Retrieval-quality metrics (Precision@k, Recall@k, MRR) ──────────────
+
+def compute_retrieval_quality(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Score retrieved IDs against oracle source IDs when both are present."""
+    scored = []
+    for row in rows:
+        retrieved = row.get("retrieved_ids") or []
+        oracle = set(row.get("oracle_ids") or [])
+        if not retrieved or not oracle:
+            continue
+        retrieved_set = set(retrieved)
+        precision = len(retrieved_set & oracle) / len(retrieved_set) if retrieved_set else 0.0
+        recall = len(retrieved_set & oracle) / len(oracle) if oracle else 0.0
+        rr = 0.0
+        for rank, doc_id in enumerate(retrieved, start=1):
+            if doc_id in oracle:
+                rr = 1.0 / rank
+                break
+        scored.append({"precision": precision, "recall": recall, "rr": rr})
+
+    if not scored:
+        return None
+    return {
+        "n": len(scored),
+        "precision_at_k": round(mean(s["precision"] for s in scored), 4),
+        "recall_at_k": round(mean(s["recall"] for s in scored), 4),
+        "mrr": round(mean(s["rr"] for s in scored), 4),
+    }
+
+
+# ── §8. Report-ready case analysis CSVs ─────────────────────────────────────
+
+CASE_CSV_COLUMNS = [
+    "id", "role", "difficulty", "user_input", "expected_output", "model_output",
+    "financial_accuracy", "role_appropriateness", "personalization_quality",
+    "hallucination_rate", "citation_correctness", "json_ok",
+    "failure_type", "explanation",
+]
+
+
+def _expected_summary(case: dict[str, Any]) -> str:
+    parts = []
+    income = case.get("income")
+    spending = case.get("spending") or {}
+    if income:
+        parts.append(f"income={income}")
+    if spending:
+        total = sum(spending.values())
+        parts.append(f"total_spent={total}")
+        parts.append(f"surplus={income - total}")
+    checks = case.get("checks") or {}
+    if checks:
+        parts.append("checks=" + "|".join(checks.keys()))
+    return "; ".join(parts)
+
+
+def _difficulty_for(case_id: str) -> str:
+    """Look up difficulty if a diverse-slice mapping exists; else 'standard'."""
+    try:
+        from benchmark_cases_diverse import DIFFICULTY_BY_ID
+    except ImportError:
+        return "standard"
+    return DIFFICULTY_BY_ID.get(case_id, "standard")
+
+
+def export_case_csvs(
+    rows: list[dict[str, Any]],
+    cases_by_id: dict[str, dict[str, Any]],
+    output_dir: Path,
+    stem: str,
+) -> dict[str, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    easy_path = output_dir / f"{stem}_easy_success_cases.csv"
+    hard_path = output_dir / f"{stem}_hard_success_cases.csv"
+    fail_path = output_dir / f"{stem}_failure_cases.csv"
+
+    easy_writer = csv.DictWriter(easy_path.open("w", encoding="utf-8", newline=""), fieldnames=CASE_CSV_COLUMNS)
+    hard_writer = csv.DictWriter(hard_path.open("w", encoding="utf-8", newline=""), fieldnames=CASE_CSV_COLUMNS)
+    fail_writer = csv.DictWriter(fail_path.open("w", encoding="utf-8", newline=""), fieldnames=CASE_CSV_COLUMNS)
+    for writer in (easy_writer, hard_writer, fail_writer):
+        writer.writeheader()
+
+    for row in rows:
+        case = cases_by_id.get(row["id"], {})
+        difficulty = _difficulty_for(row["id"])
+        failure = _first_failure(row)
+        record = {
+            "id": row["id"],
+            "role": row.get("role", ""),
+            "difficulty": difficulty,
+            "user_input": case.get("question", ""),
+            "expected_output": _expected_summary(case),
+            "model_output": (row.get("response_text") or "")[:1000],
+            "financial_accuracy": row.get("financial_accuracy"),
+            "role_appropriateness": row.get("role_appropriateness"),
+            "personalization_quality": row.get("personalization_quality"),
+            "hallucination_rate": row.get("hallucination_rate"),
+            "citation_correctness": row.get("citation_correctness"),
+            "json_ok": row.get("json_ok"),
+            "failure_type": failure or "",
+            "explanation": _failure_explanation(failure, row),
+        }
+        if failure is not None:
+            fail_writer.writerow(record)
+        elif difficulty == "hard" or row.get("financial_accuracy") == 1.0:
+            (hard_writer if difficulty == "hard" else easy_writer).writerow(record)
+
+    return {"easy": easy_path, "hard": hard_path, "failure": fail_path}
+
+
 def evaluate(path: Path, phase: str) -> dict[str, Any]:
     cases = case_by_id()
     rows = []
@@ -336,19 +608,32 @@ def evaluate(path: Path, phase: str) -> dict[str, Any]:
         if not case:
             continue
 
-        message = normalize_text(item.get("response", ""))
+        raw_response = item.get("response", "")
+        message = normalize_text(raw_response)
+        parsed = parse_model_output(raw_response, log_failure=False) if isinstance(raw_response, str) else None
+        json_ok = item.get("json_compliant")
+        if json_ok is None:
+            json_ok = parsed is not None
         hallucination = score_hallucination(message, case)
         rows.append(
             {
                 "id": item.get("id"),
                 "name": item.get("name") or case.get("name"),
                 "role": item.get("role") or case.get("role"),
+                "predicted_role": infer_target_role(message),
                 "financial_accuracy": score_financial_accuracy(item, case),
                 "role_appropriateness": score_role_appropriateness(message, case.get("role", "")),
                 "personalization_quality": score_personalization(message, case),
                 "hallucination_rate": hallucination["rate"],
                 "citation_correctness": score_citation_correctness(message, item, phase),
                 "hallucination_details": hallucination,
+                "json_ok": bool(json_ok),
+                "response_text": message,
+                "retrieved_ids": [
+                    str(s.get("id")) for s in (item.get("retrieved_sources") or [])
+                    if isinstance(s, dict) and s.get("id")
+                ],
+                "oracle_ids": item.get("oracle_ids") or [],
             }
         )
 
@@ -375,6 +660,10 @@ def evaluate(path: Path, phase: str) -> dict[str, Any]:
             "citation_correctness_pct": aggregate_metric(role_rows, "citation_correctness"),
         }
 
+    pass_rates = compute_pass_rates(rows)
+    role_classification = compute_role_classification(rows)
+    retrieval_quality = compute_retrieval_quality(rows)
+
     return {
         "meta": {
             "timestamp": datetime.now().isoformat(),
@@ -390,10 +679,22 @@ def evaluate(path: Path, phase: str) -> dict[str, Any]:
                     "Null in pre_rag when no retrieved source IDs exist; post_rag expects "
                     "retrieved_sources with IDs such as S1."
                 ),
+                "pass_rates": (
+                    "Threshold pass-rate / failure-mode breakdown. Expected labels are "
+                    "always PASS in this benchmark, so this is NOT a balanced classification "
+                    "confusion matrix — report it as a pass-rate per metric."
+                ),
+                "role_classification": (
+                    "True 3×3 classification {Student, Worker, Freelancer}. Predicted role "
+                    "is argmax of role-vocabulary scores in the model response."
+                ),
             },
         },
         "aggregate": aggregate,
         "by_role": by_role,
+        "pass_rates": pass_rates,
+        "role_classification": role_classification,
+        "retrieval_quality": retrieval_quality,
         "per_test": rows,
     }
 
@@ -420,6 +721,45 @@ def print_summary(payload: dict[str, Any]) -> None:
             f"citation={metrics['citation_correctness_pct']}"
         )
 
+    pr = payload.get("pass_rates", {}).get("overall", {})
+    if pr:
+        print("\nThreshold pass-rates (NOT a classification CM)")
+        print("-" * 72)
+        for metric, info in pr.items():
+            rate = info.get("pass_rate_pct")
+            shown = "N/A" if rate is None else f"{rate:.2f}%"
+            print(f"{metric:30s} pass={info.get('pass'):>4} / n={info.get('n'):>4}  {shown}")
+        modes = payload["pass_rates"].get("failure_modes", {})
+        if modes:
+            print("Failure modes (first tripped threshold):")
+            for mode, count in sorted(modes.items(), key=lambda x: -x[1]):
+                print(f"  {mode:30s} {count}")
+
+    rc = payload.get("role_classification") or {}
+    if rc.get("support"):
+        print("\nRole classification (3×3 CM, macro-F1)")
+        print("-" * 72)
+        print(f"accuracy={rc['accuracy']}  macro_f1={rc['macro_f1']}  support={rc['support']}")
+        header = "true/pred"
+        print(f"{header:12s}" + "".join(f"{r:>12s}" for r in (*ROLES, 'unknown')))
+        for true_role in ROLES:
+            counts = rc["confusion_matrix"][true_role]
+            print(f"{true_role:12s}" + "".join(f"{counts.get(p, 0):>12d}" for p in (*ROLES, 'unknown')))
+        for role, stats in rc["per_role"].items():
+            print(
+                f"  {role:12s} P={stats['precision']} R={stats['recall']} "
+                f"F1={stats['f1']} (support={stats['support']})"
+            )
+
+    rq = payload.get("retrieval_quality")
+    if rq:
+        print("\nRetrieval quality")
+        print("-" * 72)
+        print(
+            f"n={rq['n']}  P@k={rq['precision_at_k']}  "
+            f"R@k={rq['recall_at_k']}  MRR={rq['mrr']}"
+        )
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate thesis model metrics before/after RAG.")
@@ -437,8 +777,17 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    csv_paths = export_case_csvs(
+        payload["per_test"],
+        case_by_id(),
+        output_path.parent,
+        output_path.stem,
+    )
+
     print_summary(payload)
     print(f"\nSaved thesis evaluation to {output_path}")
+    for label, path in csv_paths.items():
+        print(f"Saved {label}_cases CSV to {path}")
 
 
 if __name__ == "__main__":
