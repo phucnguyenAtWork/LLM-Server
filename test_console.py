@@ -12,8 +12,8 @@ from typing import Any
 
 import requests
 
-from benchmark_cases import TEST_CASES
-from benchmark_cases_diverse import DIVERSE_IDS_BY_BAND
+from benchmarks.benchmark_cases import TEST_CASES
+from benchmarks.benchmark_cases_diverse import DIVERSE_IDS_BY_BAND
 
 API_URL = "http://localhost:8105/chat"
 API_STREAM_URL = "http://localhost:8105/chat/stream"

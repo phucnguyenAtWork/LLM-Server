@@ -50,6 +50,7 @@ models/
 # Logs
 *.log
 logs/
+_full_test_report.md
 
 # OS
 .DS_Store

@@ -14,7 +14,7 @@ Difficulty bands:
 
 from __future__ import annotations
 
-from benchmark_cases import TEST_CASES
+from benchmarks.benchmark_cases import TEST_CASES
 
 DIVERSE_IDS_BY_BAND: dict[str, dict[str, list[str]]] = {
     "Student": {

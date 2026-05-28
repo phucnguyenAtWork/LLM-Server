@@ -20,7 +20,7 @@ import torch
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from benchmark_cases import TEST_CASES
+from benchmarks.benchmark_cases import TEST_CASES
 from fina_schema import SYSTEM_PROMPT, parse_model_output, fallback_output
 from rag import store as rag_store
 from rag.retriever import _transaction_text

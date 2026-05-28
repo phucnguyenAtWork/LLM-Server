@@ -36,7 +36,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Any
 
-from benchmark_cases import CALC, TEST_CASES
+from benchmarks.benchmark_cases import CALC, TEST_CASES
 from fina_schema import parse_model_output
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -548,7 +548,7 @@ def _expected_summary(case: dict[str, Any]) -> str:
 def _difficulty_for(case_id: str) -> str:
     """Look up difficulty if a diverse-slice mapping exists; else 'standard'."""
     try:
-        from benchmark_cases_diverse import DIFFICULTY_BY_ID
+        from benchmarks.benchmark_cases_diverse import DIFFICULTY_BY_ID
     except ImportError:
         return "standard"
     return DIFFICULTY_BY_ID.get(case_id, "standard")
